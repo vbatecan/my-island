@@ -1,0 +1,122 @@
+name: Windows release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  checks:
+    uses: ./.github/workflows/windows-ci.yml
+    permissions:
+      contents: read
+  build:
+    needs: checks
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate tag and Cargo version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/release-version.ps1 -Tag $env:RELEASE_TAG -OutputFile $env:GITHUB_OUTPUT
+      - name: Install stable Rust
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw 'Rust selection failed' }
+          "version=$((rustc --version).Split(' ')[1])" >> $env:GITHUB_OUTPUT
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/msix-build
+          key: windows-static-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: windows-static-${{ steps.rust.outputs.version }}-
+      - name: Install portable Inno compiler
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/setup-inno.ps1
+      - name: Build self-contained native executable
+        env:
+          MSIX_VERSION: ${{ steps.version.outputs.msix_version }}
+        run: ./scripts/package.ps1 -Version $env:MSIX_VERSION
+      - name: Sign executable when credentials are configured
+        id: sign
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNING_PUBLISHER: ${{ secrets.WINDOWS_SIGNING_PUBLISHER }}
+        run: |
+          $publisher = if ($env:WINDOWS_SIGNING_PUBLISHER) { $env:WINDOWS_SIGNING_PUBLISHER } else { 'CN=StillIslandDevelopment' }
+          ./scripts/sign-release.ps1 -Paths @('target/msix-build/x86_64-pc-windows-msvc/release/still-island.exe') -ExpectedPublisher $publisher -OutputFile $env:GITHUB_OUTPUT
+      - name: Package final executable
+        env:
+          MSIX_VERSION: ${{ steps.version.outputs.msix_version }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          WINDOWS_SIGNING_PUBLISHER: ${{ secrets.WINDOWS_SIGNING_PUBLISHER }}
+        run: |
+          $publisher = if ($env:WINDOWS_SIGNING_PUBLISHER) { $env:WINDOWS_SIGNING_PUBLISHER } else { 'CN=StillIslandDevelopment' }
+          ./scripts/package.ps1 -SkipBuild -Version $env:MSIX_VERSION -Publisher $publisher
+          ./scripts/build-installer.ps1 -Executable 'target/msix-build/x86_64-pc-windows-msvc/release/still-island.exe' -Version $env:APP_VERSION -Compiler 'target/tools/inno/ISCC.exe'
+      - name: Sign installer packages
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          MSIX_VERSION: ${{ steps.version.outputs.msix_version }}
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNING_PUBLISHER: ${{ secrets.WINDOWS_SIGNING_PUBLISHER }}
+        run: |
+          $publisher = if ($env:WINDOWS_SIGNING_PUBLISHER) { $env:WINDOWS_SIGNING_PUBLISHER } else { 'CN=StillIslandDevelopment' }
+          ./scripts/sign-release.ps1 -Paths @("target/dist/StillIsland-$env:APP_VERSION-windows-x64-setup.exe", "target/msix/StillIsland_$($env:MSIX_VERSION)_x64_unsigned.msix") -ExpectedPublisher $publisher
+      - name: Assemble and checksum release assets
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          MSIX_VERSION: ${{ steps.version.outputs.msix_version }}
+          SIGNED: ${{ steps.sign.outputs.signing_enabled }}
+        run: |
+          ./scripts/assemble-release.ps1 -Version $env:APP_VERSION -MsixVersion $env:MSIX_VERSION -Signed:($env:SIGNED -eq 'true')
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-release
+          path: target/release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: windows-release
+          path: assets
+      - name: Publish complete GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum --check SHA256SUMS
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > draft.txt 2>/dev/null; then
+            test "$(cat draft.txt)" = true || { echo 'Refusing to overwrite an already-published version'; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Still Island $RELEASE_TAG" --generate-notes --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" ./*.exe ./*.zip ./*.msix SHA256SUMS release-manifest.json --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

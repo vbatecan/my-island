@@ -1,0 +1,323 @@
+export { SettingsWindow, NotificationApp } from "settings.slint";
+
+component Glyph inherits Text {
+    font-family: "Segoe Fluent Icons";
+    font-size: 18px;
+    color: white;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+component QuietButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> enabled: true;
+    callback clicked();
+    callback interaction(bool);
+    width: 32px;
+    height: 28px;
+    border-radius: self.height / 2;
+    background: root.enabled && pointer.has-hover ? #ffffff18 : transparent;
+    opacity: root.enabled ? 1 : 0.3;
+    Glyph { text: root.glyph; font-size: 15px; }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        changed pressed => { root.interaction(self.pressed); }
+        clicked => { root.clicked(); }
+    }
+}
+
+component Artwork inherits Rectangle {
+    in property <image> artwork;
+    in property <bool> has-artwork: false;
+    in property <string> placeholder-glyph: "\u{e8d6}";
+    border-radius: 10px;
+    background: #ffffff16;
+    clip: true;
+    if root.has-artwork : Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: root.artwork; image-fit: cover; }
+    if !root.has-artwork : Glyph { x: 0px; y: 0px; width: parent.width; height: parent.height; text: root.placeholder-glyph; font-size: 22px; color: #b4b4bc; }
+}
+
+export component IslandWindow inherits Window {
+    title: "Still Island";
+    width: 420px;
+    height: 220px;
+    background: transparent;
+    no-frame: true;
+    default-font-family: "Segoe UI Variable";
+    default-font-size: 13px;
+
+    in property <float> shape-width: 126;
+    in property <float> shape-height: 32;
+    in property <float> shape-radius: 16;
+    in property <float> reveal: 0;
+    in property <float> compact-reveal: 0;
+    in property <float> content-shift: 8;
+    in property <bool> media-mode: false;
+    in property <bool> volume-mode: false;
+    in property <bool> playing: false;
+    in property <int> volume: 0;
+    in property <bool> volume-muted: false;
+    in property <bool> volume-available: false;
+    in property <bool> media-available: false;
+    in property <bool> can-play-pause: false;
+    in property <bool> can-previous: false;
+    in property <bool> can-next: false;
+    in property <bool> can-seek: false;
+    in property <string> track-title: "No media session";
+    in property <string> artist-name: "Open a music or video app";
+    in property <string> media-source: "";
+    in property <string> service-status: "";
+    in property <float> progress: 0;
+    in property <string> elapsed-label: "0:00";
+    in property <string> duration-label: "0:00";
+    in property <image> artwork;
+    in property <bool> has-artwork: false;
+    // 0: solid, 1: transparent, 2: native acrylic, 3: glass.
+    in property <int> appearance: 0;
+    in property <float> tint-opacity: 0.55;
+    in property <string> material-name: "Solid";
+    in property <image> glass-texture;
+    in property <bool> has-glass-texture: false;
+
+    in property <bool> notification-mode: false;
+    in property <bool> notification-compact: false;
+    in property <string> notification-app: "";
+    in property <string> notification-title: "";
+    in property <string> notification-body: "";
+    in property <int> notification-count: 0;
+    in property <image> notification-icon;
+    in property <bool> has-notification-icon: false;
+    in property <bool> can-open-source: false;
+    in property <int> pending-count: 0;
+    in property <bool> compact-media: false;
+    in property <bool> volume-feedback: false;
+    callback expand-notification();
+    callback open-source();
+    callback hide-notification();
+    callback settings-requested();
+    callback escape();
+    callback pointer-interaction(bool);
+
+    callback volume-updated(bool);
+    callback notifications-updated();
+    callback media-updated();
+    callback backdrop-updated();
+    in property <float> position-seconds: 0;
+    in property <float> duration-seconds: 0;
+    callback toggle();
+    callback hover(bool);
+    callback collapse();
+    callback open-media();
+    callback open-volume();
+    callback play-pause();
+    callback previous();
+    callback next();
+    callback volume-change(int);
+    callback toggle-mute();
+    callback seek(float);
+
+    forward-focus: keyboard;
+    keyboard := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.escape(); return accept; }
+            return reject;
+        }
+    }
+    island := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 0;
+        width: root.shape-width * 1px;
+        height: root.shape-height * 1px;
+        border-radius: root.shape-radius * 1px;
+        background: root.appearance == 0 ? #000000 : root.appearance == 3 && root.has-glass-texture ? transparent : rgba(0, 0, 0, min(1, max(0, root.tint-opacity)));
+        clip: true;
+        if root.appearance == 3 && root.has-glass-texture : Image {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            source: root.glass-texture; image-fit: fill;
+        }
+        if root.appearance == 3 && root.has-glass-texture : Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            background: rgba(0, 0, 0, min(1, max(0, root.tint-opacity)));
+        }
+        // Rim and broad specular tint complement the refracted backdrop supplied by Rust.
+        if root.appearance == 3 : Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            border-radius: root.shape-radius * 1px;
+            border-width: 1px; border-color: #ffffff32;
+            background: @linear-gradient(145deg, #ffffff16 0%, #ffffff00 42%, #ffffff08 100%);
+        }
+        island-pointer := TouchArea {
+            clicked => { root.toggle(); }
+            changed has-hover => { root.hover(self.has-hover); }
+            changed pressed => { root.pointer-interaction(self.pressed); }
+        }
+
+        // Compact state keeps real system volume accessible without a large panel.
+        Rectangle {
+            x: (parent.width - 184px) / 2;
+            y: (parent.height - 30px) / 2;
+            width: 184px; height: 30px;
+            opacity: root.compact-reveal;
+            visible: root.compact-reveal > 0.001 && !root.notification-compact && !root.compact-media;
+            QuietButton { interaction(down) => { root.pointer-interaction(down); }
+                x: -3px; y: -1px; width: 27px; height: 29px;
+                glyph: root.volume-muted ? "\u{e74f}" : "\u{e767}";
+                enabled: root.volume-available;
+                clicked => { root.toggle-mute(); }
+            }
+            Text { x: 34px; y: 0px; width: 110px; height: 18px; color: white; font-size: 12px; font-weight: 600; text: root.volume-muted ? "Muted" : "Volume"; }
+            Text { x: 140px; y: 0px; width: 44px; height: 18px; horizontal-alignment: right; color: #c4c4ca; font-size: 11px; text: root.volume-available ? root.volume + "%" : "—"; }
+            Rectangle {
+                x: 34px; y: 23px; width: 150px; height: 3px; border-radius: 2px; background: #ffffff28;
+                Rectangle { x: 0px; y: 0px; width: parent.width * root.volume / 100; height: parent.height; border-radius: 2px; background: root.volume-muted ? #96969e : #e7e7eb; }
+            }
+            compact-slider := TouchArea {
+                x: 34px; y: 16px; width: 150px; height: 14px;
+                enabled: root.volume-available;
+                changed pressed => { root.pointer-interaction(self.pressed); }
+                clicked => { root.volume-change(round(min(100, max(0, self.mouse-x / self.width * 100)))); }
+                moved => { if self.pressed { root.volume-change(round(min(100, max(0, self.mouse-x / self.width * 100)))); } }
+            }
+        }
+
+        if root.notification-compact : Rectangle {
+            x: (parent.width - 184px) / 2; y: (parent.height - 30px) / 2;
+            width: 184px; height: 30px; opacity: root.compact-reveal;
+            visible: root.compact-reveal > 0.001;
+            Artwork { x: 0px; y: 2px; width: 26px; height: 26px; artwork: root.notification-icon; has-artwork: root.has-notification-icon; placeholder-glyph: "\u{e7f4}"; }
+            Text { x: 36px; y: 0px; width: root.notification-count > 1 ? 116px : 148px; height: 13px; text: root.notification-app; color: #b9b9c2; font-size: 10px; overflow: elide; }
+            Text { x: 36px; y: 15px; width: 148px; height: 15px; text: root.notification-title; color: white; font-size: 11px; font-weight: 600; overflow: elide; }
+            if root.notification-count > 1 : Text { x: 160px; y: 0px; width: 24px; height: 13px; horizontal-alignment: right; color: #b9b9c2; font-size: 9px; text: root.notification-count > 9 ? "9+" : root.notification-count; }
+            TouchArea {
+                changed pressed => { root.pointer-interaction(self.pressed); }
+                clicked => { root.expand-notification(); }
+            }
+        }
+        if root.compact-media : Rectangle {
+            x: (parent.width - 184px) / 2; y: (parent.height - 30px) / 2;
+            width: 184px; height: 30px; opacity: root.compact-reveal;
+            visible: root.compact-reveal > 0.001;
+            Artwork { x: 0px; y: 0px; width: 30px; height: 30px; artwork: root.artwork; has-artwork: root.has-artwork; }
+            Text { x: 40px; y: 0px; width: 108px; height: 16px; text: root.track-title; color: white; font-size: 11px; font-weight: 600; overflow: elide; }
+            Text { x: 40px; y: 17px; width: 108px; height: 13px; text: root.playing ? "Playing" : "Paused"; color: #b8b8c1; font-size: 10px; }
+            TouchArea { x: 0px; y: 0px; width: 148px; height: 30px; changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-media(); } }
+            QuietButton { interaction(down) => { root.pointer-interaction(down); } x: 154px; y: 1px; width: 30px; height: 28px; glyph: root.playing ? "\u{e769}" : "\u{e768}"; enabled: root.can-play-pause; clicked => { root.play-pause(); } }
+        }
+
+        Rectangle {
+            x: (parent.width - 312px) / 2;
+            y: 14px + root.content-shift * 1px;
+            width: 312px; height: 132px;
+            opacity: root.reveal;
+            visible: root.reveal > 0.001;
+            Text {
+                x: 0px; y: 1px; width: root.volume-feedback ? 134px : 224px; height: 20px;
+                color: #b8b8c0; font-size: 10px; font-weight: 600; letter-spacing: 1px;
+                overflow: elide;
+                text: root.notification-mode ? root.notification-app : root.media-mode ? (root.service-status != "" ? root.service-status : (root.media-source == "" ? "NOW PLAYING" : root.media-source)) : root.volume-mode ? "SYSTEM AUDIO" : "STILL";
+            }
+            if root.volume-feedback : Rectangle {
+                x: 143px; y: -2px; width: 78px; height: 23px; border-radius: 11px; background: #333338;
+                Glyph { x: 7px; y: 3px; width: 16px; height: 17px; font-size: 11px; text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
+                Text { x: 28px; y: 3px; width: 42px; height: 17px; color: white; font-size: 10px; text: root.volume-muted ? "Muted" : root.volume + "%"; }
+            }
+            if root.pending-count > 0 && !root.notification-mode : Rectangle {
+                x: 227px; y: 0px; width: 19px; height: 17px; border-radius: 8px; background: #ffffff20;
+                Text { text: root.pending-count > 9 ? "9+" : root.pending-count; color: white; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { clicked => { root.expand-notification(); } }
+            }
+            QuietButton { interaction(down) => { root.pointer-interaction(down); } x: 250px; y: -4px; width: 28px; height: 26px; glyph: "\u{e713}"; clicked => { root.settings-requested(); } }
+            QuietButton { interaction(down) => { root.pointer-interaction(down); } x: 284px; y: -4px; width: 28px; height: 26px; glyph: "\u{e711}"; clicked => { root.collapse(); } }
+
+            if root.notification-mode : Rectangle {
+                x: 0px; y: 28px; width: 312px; height: 104px;
+                Artwork { x: 0px; y: 0px; width: 29px; height: 29px; artwork: root.notification-icon; has-artwork: root.has-notification-icon; placeholder-glyph: "\u{e7f4}"; }
+                Text { x: 40px; y: 0px; width: 272px; height: 32px; color: white; font-size: 13px; font-weight: 600; text: root.notification-title; wrap: word-wrap; overflow: elide; }
+                Text { x: 0px; y: 39px; width: 312px; height: 31px; color: #bfbfc8; font-size: 11px; text: root.notification-body; wrap: word-wrap; overflow: elide; }
+                Rectangle {
+                    x: 0px; y: 80px; width: 120px; height: 25px; border-radius: 12px;
+                    background: root.can-open-source && open-source-touch.has-hover ? #ffffff28 : #ffffff15;
+                    opacity: root.can-open-source ? 1 : 0.4;
+                    Text { text: "Open app"; font-size: 11px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                    open-source-touch := TouchArea { enabled: root.can-open-source; changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-source(); } }
+                }
+                Rectangle {
+                    x: 132px; y: 80px; width: 180px; height: 25px; border-radius: 12px;
+                    background: hide-touch.has-hover ? #ffffff15 : transparent;
+                    Text { text: "Hide preview"; font-size: 11px; color: #bfbfc8; horizontal-alignment: center; vertical-alignment: center; }
+                    hide-touch := TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.hide-notification(); } }
+                }
+            }
+            if !root.media-mode && !root.volume-mode && !root.notification-mode : Rectangle {
+                x: 0px; y: 35px; width: parent.width; height: 94px;
+                Rectangle {
+                    x: 0px; y: 0px; width: 198px; height: 83px; border-radius: 15px;
+                    background: media-touch.has-hover ? #ffffff20 : #ffffff11;
+                    Artwork { x: 12px; y: 12px; width: 39px; height: 39px; artwork: root.artwork; has-artwork: root.has-artwork; }
+                    Text { x: 62px; y: 14px; width: 123px; height: 18px; color: white; font-size: 12px; font-weight: 600; overflow: elide; text: root.media-available ? root.track-title : "No media session"; }
+                    Text { x: 62px; y: 35px; width: 123px; height: 16px; color: #a4a4ae; font-size: 10px; overflow: elide; text: root.media-available ? root.artist-name : "Open a music app"; }
+                    Text { x: 13px; y: 62px; width: 150px; height: 14px; color: #aaaab3; font-size: 10px; text: "Media controls"; }
+                    Glyph { x: 171px; y: 59px; width: 16px; height: 15px; font-size: 10px; text: "\u{e76c}"; color: #bdbdc5; }
+                    media-touch := TouchArea { clicked => { root.open-media(); } }
+                }
+                Rectangle {
+                    x: 208px; y: 0px; width: 104px; height: 83px; border-radius: 15px;
+                    background: volume-touch.has-hover ? #ffffff20 : #ffffff11;
+                    Glyph { x: 12px; y: 13px; width: 22px; height: 22px; text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
+                    Text { x: 43px; y: 16px; width: 50px; height: 18px; color: white; font-size: 13px; text: root.volume-available ? root.volume + "%" : "—"; }
+                    Rectangle { x: 13px; y: 48px; width: 78px; height: 4px; border-radius: 2px; background: #ffffff28;
+                        Rectangle { x: 0px; y: 0px; width: parent.width * root.volume / 100; height: parent.height; border-radius: 2px; background: root.volume-muted ? #96969e : #e7e7eb; }
+                    }
+                    Text { x: 13px; y: 62px; color: #aaaab3; font-size: 10px; text: "Volume"; }
+                    volume-touch := TouchArea { clicked => { root.open-volume(); } }
+                }
+            }
+
+            if root.media-mode && !root.notification-mode : Rectangle {
+                x: 0px; y: 29px; width: 312px; height: 104px;
+                Artwork { x: 0px; y: 0px; width: 43px; height: 43px; artwork: root.artwork; has-artwork: root.has-artwork; }
+                Text { x: 55px; y: 1px; width: 257px; height: 20px; color: white; font-size: 14px; font-weight: 600; overflow: elide; text: root.media-available ? root.track-title : "No media session"; }
+                Text { x: 55px; y: 24px; width: 257px; height: 17px; color: #aaaab4; font-size: 11px; overflow: elide; text: root.media-available ? root.artist-name : "Start playback in a supported app"; }
+                QuietButton { interaction(down) => { root.pointer-interaction(down); } x: 92px; y: 44px; width: 32px; height: 29px; glyph: "\u{e892}"; enabled: root.media-available && root.can-previous; clicked => { root.previous(); } }
+                QuietButton { interaction(down) => { root.pointer-interaction(down); } x: 138px; y: 41px; width: 36px; height: 34px; glyph: root.playing ? "\u{e769}" : "\u{e768}"; enabled: root.media-available && root.can-play-pause; clicked => { root.play-pause(); } }
+                QuietButton { interaction(down) => { root.pointer-interaction(down); } x: 188px; y: 44px; width: 32px; height: 29px; glyph: "\u{e893}"; enabled: root.media-available && root.can-next; clicked => { root.next(); } }
+                Rectangle { x: 0px; y: 82px; width: 312px; height: 3px; border-radius: 2px; background: #ffffff28;
+                    Rectangle { x: 0px; y: 0px; width: parent.width * min(1, max(0, root.progress)); height: parent.height; border-radius: 2px; background: #e4e4ea; }
+                }
+                seek-area := TouchArea {
+                    x: 0px; y: 76px; width: 312px; height: 15px;
+                    enabled: root.media-available && root.can-seek;
+                    changed pressed => { root.pointer-interaction(self.pressed); }
+                    clicked => { root.seek(min(1, max(0, self.mouse-x / self.width))); }
+                }
+                Text { x: 0px; y: 91px; width: 60px; height: 12px; color: #aaaab4; font-size: 9px; text: root.elapsed-label; }
+                Text { x: 252px; y: 91px; width: 60px; height: 12px; horizontal-alignment: right; color: #aaaab4; font-size: 9px; text: root.duration-label; }
+            }
+
+            if root.volume-mode && !root.notification-mode : Rectangle {
+                x: 0px; y: 33px; width: 312px; height: 96px;
+                QuietButton { interaction(down) => { root.pointer-interaction(down); }
+                    x: -1px; y: -2px; width: 40px; height: 40px;
+                    glyph: root.volume-muted ? "\u{e74f}" : "\u{e767}";
+                    enabled: root.volume-available;
+                    clicked => { root.toggle-mute(); }
+                }
+                Text { x: 52px; y: 1px; width: 185px; height: 22px; color: white; font-size: 16px; font-weight: 600; text: root.volume-muted ? "Muted" : "Output volume"; }
+                Text { x: 52px; y: 26px; width: 185px; height: 16px; overflow: elide; color: #aaaab4; font-size: 11px; text: root.volume-available ? "Default Windows output" : "No output device available"; }
+                Text { x: 245px; y: 1px; width: 67px; height: 30px; horizontal-alignment: right; color: white; font-size: 23px; text: root.volume-available ? root.volume + "%" : "—"; }
+                Rectangle { x: 0px; y: 62px; width: 312px; height: 6px; border-radius: 3px; background: #ffffff28;
+                    Rectangle { x: 0px; y: 0px; width: parent.width * root.volume / 100; height: parent.height; border-radius: 3px; background: root.volume-muted ? #96969e : #e4e4ea; }
+                    Rectangle { x: max(0px, min(parent.width - 12px, parent.width * root.volume / 100 - 6px)); y: -3px; width: 12px; height: 12px; border-radius: 6px; background: root.volume-available ? white : #96969e; }
+                }
+                volume-slider := TouchArea {
+                    x: 0px; y: 49px; width: 312px; height: 31px;
+                    enabled: root.volume-available;
+                    changed pressed => { root.pointer-interaction(self.pressed); }
+                    clicked => { root.volume-change(round(min(100, max(0, self.mouse-x / self.width * 100)))); }
+                    moved => { if self.pressed { root.volume-change(round(min(100, max(0, self.mouse-x / self.width * 100)))); } }
+                }
+                Text { x: 0px; y: 83px; width: 312px; height: 13px; overflow: elide; color: #a8a8b2; font-size: 9px; text: root.service-status == "" ? "Drag to adjust · tap speaker to mute" : root.service-status; }
+            }
+        }
+    }
+}

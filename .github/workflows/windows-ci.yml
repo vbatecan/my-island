@@ -1,0 +1,50 @@
+name: Windows CI
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    name: Rust checks (Windows x64)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install stable Rust
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw 'Rust selection failed' }
+          "version=$((rustc --version).Split(' ')[1])" >> $env:GITHUB_OUTPUT
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: windows-check-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: windows-check-${{ steps.rust.outputs.version }}-
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Type check
+        run: cargo check --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-targets
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Release tooling tests
+        run: ./scripts/test-release.ps1

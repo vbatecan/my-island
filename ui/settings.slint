@@ -1,0 +1,170 @@
+import { Button, CheckBox, ComboBox, Slider, SpinBox, ScrollView, Palette } from "std-widgets.slint";
+
+export struct NotificationApp { app-id: string, app-name: string, enabled: bool }
+component Heading inherits Text { font-size: 16px; font-weight: 600; color: #f0f0f5; vertical-stretch: 0; }
+component Label inherits Text { font-size: 13px; color: #dedee6; vertical-stretch: 0; }
+component Note inherits Text { font-size: 11px; color: #a6a6b2; wrap: word-wrap; vertical-stretch: 0; }
+component Rule inherits Rectangle { height: 1px; background: #ffffff12; vertical-stretch: 0; }
+
+export component SettingsWindow inherits Window {
+    title: "Still Island Settings";
+    preferred-width: 600px; preferred-height: 650px;
+    min-width: 560px; min-height: 580px;
+    background: #17171b;
+    default-font-family: "Segoe UI Variable";
+    default-font-size: 13px;
+    in-out property <int> appearance-index: 0;
+    in-out property <float> tint: 0.55;
+    in-out property <int> bounce-index: 1;
+    in-out property <bool> animations-enabled: true;
+    in-out property <bool> follow-reduced-motion: true;
+    in-out property <int> top-offset: 6;
+    in-out property <bool> island-always-on-top: true;
+    in-out property <bool> notifications-enabled: false;
+    in-out property <bool> notifications-paused: false;
+    in property <bool> notification-access-requestable: true;
+    in property <string> notification-access: "Notification access has not been enabled.";
+    in-out property <int> privacy-index: 0;
+    in-out property <int> notification-duration: 6;
+    in property <string> blocked-apps;
+    in property <[NotificationApp]> observed-apps;
+    in-out property <bool> auto-volume: true;
+    in-out property <bool> compact-now-playing: false;
+    in-out property <bool> hover-expand: false;
+    in-out property <int> hover-delay: 450;
+    in-out property <bool> outside-click: true;
+    in-out property <bool> shortcut-enabled: false;
+    in-out property <bool> fullscreen-hide: true;
+    in property <[string]> monitor-names: ["Primary display"];
+    in-out property <int> monitor-index: 0;
+    in property <string> status-text;
+    private property <int> page: 0;
+    callback changed();
+    callback reset-defaults();
+    callback enable-notifications();
+    callback retry-notifications();
+    callback close-settings();
+    callback preview-motion();
+    callback app-filter-changed(string, bool);
+    init => { Palette.color-scheme = dark; }
+    forward-focus: keyboard;
+    keyboard := FocusScope {
+        key-pressed(event) => { if event.text == Key.Escape { root.close-settings(); return accept; } return reject; }
+        VerticalLayout {
+            padding: 24px; spacing: 14px;
+            Text { text: "Make it yours"; font-size: 25px; font-weight: 600; color: white; vertical-stretch: 0; }
+            Note { text: "A quiet island, tuned to your desktop. Changes save automatically."; }
+            HorizontalLayout {
+                spacing: 7px;
+                Button { text: "Appearance"; checkable: true; checked: root.page == 0; clicked => { root.page = 0; } }
+                Button { text: "Notifications"; checkable: true; checked: root.page == 1; clicked => { root.page = 1; } }
+                Button { text: "Behavior"; checkable: true; checked: root.page == 2; clicked => { root.page = 2; } }
+                Button { text: "Display"; checkable: true; checked: root.page == 3; clicked => { root.page = 3; } }
+            }
+            Rule {}
+            Rectangle {
+                min-height: 330px;
+                if root.page == 0 : ScrollView {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    VerticalLayout {
+                        padding-right: 14px; spacing: 14px;
+                        Heading { text: "Material"; }
+                        ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
+                        Note { text: root.appearance-index == 4 ? "Live glass follows the desktop. It uses more graphics resources than Eco glass." : root.appearance-index == 3 ? "Eco glass refreshes its backdrop on interaction and display changes." : "Use transparency and tint to balance lightness with readable controls."; }
+                        HorizontalLayout {
+                            Label { text: "Tint strength"; }
+                            Text { text: round(root.tint * 100) + "%"; color: #bcbcc7; horizontal-alignment: right; }
+                        }
+                        Slider { accessible-label: "Tint strength"; minimum: 0.1; maximum: 0.95; value <=> root.tint; changed => { root.changed(); } }
+                        Rule {}
+                        Heading { text: "Motion"; }
+                        CheckBox { text: "Enable animations"; checked <=> root.animations-enabled; toggled => { root.changed(); } }
+                        CheckBox { text: "Respect Windows reduced motion"; checked <=> root.follow-reduced-motion; toggled => { root.changed(); } }
+                        Label { text: "Spring character"; }
+                        ComboBox { accessible-label: "Spring character"; enabled: root.animations-enabled; model: ["Calm", "Balanced", "Bouncy"]; current-index <=> root.bounce-index; selected => { root.changed(); } }
+                        Button { text: "Preview motion"; enabled: root.animations-enabled; clicked => { root.preview-motion(); } }
+                        Note { text: "Retargeting preserves momentum, including when you reverse a transition."; }
+                    }
+                }
+                if root.page == 1 : ScrollView {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    VerticalLayout {
+                        padding-right: 14px; spacing: 13px;
+                        Heading { text: "Notification previews"; }
+                        Note { text: root.notification-access; }
+                        HorizontalLayout {
+                            Button { text: "Enable access…"; enabled: root.notification-access-requestable; clicked => { root.enable-notifications(); } }
+                            Button { text: "Retry access"; enabled: root.notification-access-requestable; clicked => { root.retry-notifications(); } }
+                        }
+                        CheckBox { text: "Show notification previews"; checked <=> root.notifications-enabled; toggled => { root.changed(); } }
+                        CheckBox { text: "Pause previews"; checked <=> root.notifications-paused; toggled => { root.changed(); } }
+                        Label { text: "Preview privacy"; }
+                        ComboBox { accessible-label: "Notification privacy"; model: ["Title only", "App identity only", "Body in expanded preview"]; current-index <=> root.privacy-index; selected => { root.changed(); } }
+                        Note { text: "Compact previews never show message bodies. Hide preview removes the island preview, not the Windows notification."; }
+                        HorizontalLayout {
+                            Label { text: "Compact preview duration (seconds)"; }
+                            SpinBox { accessible-label: "Notification duration in seconds"; minimum: 2; maximum: 30; value <=> root.notification-duration; edited => { root.changed(); } }
+                        }
+                        Rule {}
+                        Heading { text: "Apps"; }
+                        Note { text: "Choose which apps may appear. Apps are listed after Windows supplies a notification from them."; }
+                        if root.observed-apps.length == 0 : Note { text: "No notification apps discovered yet."; }
+                        for app in root.observed-apps : CheckBox {
+                            text: app.app-name; checked: app.enabled;
+                            toggled => { root.app-filter-changed(app.app-id, self.checked); }
+                        }
+                    }
+                }
+                if root.page == 2 : ScrollView {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    VerticalLayout {
+                        padding-right: 14px; spacing: 15px;
+                        Heading { text: "Automatic activity"; }
+                        CheckBox { text: "Show system volume changes"; checked <=> root.auto-volume; toggled => { root.changed(); } }
+                        Note { text: "Volume feedback stays small while you are using an open panel."; }
+                        CheckBox { text: "Show compact Now Playing"; checked <=> root.compact-now-playing; toggled => { root.changed(); } }
+                        Rule {}
+                        Heading { text: "Interaction"; }
+                        CheckBox { text: "Expand on hover"; checked <=> root.hover-expand; toggled => { root.changed(); } }
+                        HorizontalLayout {
+                            Label { text: "Hover delay (milliseconds)"; }
+                            SpinBox { accessible-label: "Hover delay in milliseconds"; minimum: 150; maximum: 2000; step-size: 50; value <=> root.hover-delay; enabled: root.hover-expand; edited => { root.changed(); } }
+                        }
+                        CheckBox { text: "Collapse on outside click"; checked <=> root.outside-click; toggled => { root.changed(); } }
+                        CheckBox { text: "Enable Ctrl + Alt + I shortcut"; checked <=> root.shortcut-enabled; toggled => { root.changed(); } }
+                        Note { text: "Escape closes an active island panel or this settings window. The overlay does not take keyboard focus from your app."; }
+                        Rule {}
+                        CheckBox { text: "Hide over fullscreen apps"; checked <=> root.fullscreen-hide; toggled => { root.changed(); } }
+                    }
+                }
+                if root.page == 3 : ScrollView {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    VerticalLayout {
+                        padding-right: 14px; spacing: 15px;
+                        Heading { text: "Placement"; }
+                        Label { text: "Display"; }
+                        ComboBox { accessible-label: "Overlay display"; model: root.monitor-names; current-index <=> root.monitor-index; selected => { root.changed(); } }
+                        Note { text: "Primary display follows the primary monitor when your display configuration changes."; }
+                        HorizontalLayout {
+                            Label { text: "Top offset (logical pixels)"; }
+                            SpinBox { accessible-label: "Top offset in logical pixels"; minimum: 0; maximum: 80; value <=> root.top-offset; edited => { root.changed(); } }
+                        }
+                        CheckBox { text: "Always on top"; checked <=> root.island-always-on-top; toggled => { root.changed(); } }
+                        Rule {}
+                        Heading { text: "A little breathing room"; }
+                        Note { text: "The island stays centered on the chosen display. Empty space around its current shape remains available to the desktop."; }
+                    }
+                }
+            }
+            Rule {}
+            Note { text: root.status-text == "" ? "Saved locally on this PC." : root.status-text; }
+            HorizontalLayout {
+                Button { text: "Reset defaults"; clicked => { root.reset-defaults(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Done"; primary: true; clicked => { root.close-settings(); } }
+            }
+        }
+    }
+}
+
+
