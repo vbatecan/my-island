@@ -24,9 +24,20 @@ use windows::{
 };
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MediaPlayer {
+    /// Opaque identity for one live session, never an application-wide identifier.
+    pub id: String,
+    pub name: String,
+    pub playing: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct MediaSnapshot {
+    pub players: Vec<MediaPlayer>,
+    /// Empty selects Automatic; otherwise one of `players`' opaque session IDs.
+    pub selected_player: String,
     pub title: String,
     pub artist: String,
+    pub album: String,
     pub source: String,
     pub playing: bool,
     pub available: bool,
@@ -42,8 +53,11 @@ pub struct MediaSnapshot {
 impl Default for MediaSnapshot {
     fn default() -> Self {
         Self {
+            players: Vec::new(),
+            selected_player: String::new(),
             title: "Nothing playing".into(),
             artist: "Start media in a supported app".into(),
+            album: String::new(),
             source: String::new(),
             playing: false,
             available: false,
@@ -61,6 +75,7 @@ impl Default for MediaSnapshot {
 
 enum Command {
     Refresh,
+    Select(String),
     PlayPause,
     Previous,
     Next,
@@ -126,8 +141,10 @@ impl MediaService {
             .name("still-media".into())
             .spawn(move || {
                 if let Err(error) = worker(&state, receiver) {
-                    let mut snapshot = MediaSnapshot::default();
-                    snapshot.error = Some(error);
+                    let snapshot = MediaSnapshot {
+                        error: Some(error),
+                        ..MediaSnapshot::default()
+                    };
                     state.publish(snapshot);
                 }
             })
@@ -138,15 +155,32 @@ impl MediaService {
         })
     }
     pub fn snapshot(&self) -> MediaSnapshot {
-        self.shared
+        self.with_snapshot(MediaSnapshot::clone)
+    }
+    /// Read selected metadata without cloning artwork or the entire player list.
+    /// Keep the reader brief and do not re-enter the service while holding the lock.
+    pub fn with_snapshot<R>(&self, read: impl FnOnce(&MediaSnapshot) -> R) -> R {
+        let snapshot = self
+            .shared
             .snapshot
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .unwrap_or_else(|e| e.into_inner());
+        read(&snapshot)
     }
     /// Queue an event-driven refresh; does not create a recurring timer.
     pub fn refresh(&self) {
         self.shared.notify(7);
+    }
+    /// Select a live session, or pass an empty ID to follow Automatic selection.
+    /// The worker revalidates the ID; vanished sessions fall back to Automatic.
+    pub fn select_player(&self, id: String) -> Result<(), String> {
+        if self.shared.stopping.load(Ordering::Acquire) {
+            return Err("Media service stopped".into());
+        }
+        self.shared
+            .sender
+            .send(Command::Select(id))
+            .map_err(|_| "Media service is unavailable".into())
     }
     fn command(&self, command: Command) -> Result<(), String> {
         if self.shared.stopping.load(Ordering::Acquire) {
@@ -251,7 +285,7 @@ impl SessionEvents {
             .map_err(|e| e.to_string())?;
         let state = shared.clone();
         let playback = match session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
-            state.notify(1);
+            state.notify(5);
             Ok(())
         })) {
             Ok(token) => token,
@@ -327,41 +361,202 @@ impl Drop for ManagerEvents {
     }
 }
 
+struct PlayerSession {
+    session: Session,
+    source: String,
+    id: String,
+    playback: i64,
+}
+impl PlayerSession {
+    fn new(session: Session, id: String, shared: &Arc<Shared>) -> Result<Self, String> {
+        let state = shared.clone();
+        let playback = session
+            .PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
+                // A background player can start without becoming Windows' current
+                // session. Re-arbitrate on every player's playback changes.
+                state.notify(5);
+                Ok(())
+            }))
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            source: session
+                .SourceAppUserModelId()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            session,
+            id,
+            playback,
+        })
+    }
+}
+impl Drop for PlayerSession {
+    fn drop(&mut self) {
+        let _ = self.session.RemovePlaybackInfoChanged(self.playback);
+    }
+}
+
+fn choose_player(
+    players: &[MediaPlayer],
+    selected: &mut String,
+    current: Option<usize>,
+) -> Option<usize> {
+    if !selected.is_empty() {
+        if let Some(index) = players.iter().position(|p| &p.id == selected) {
+            return Some(index);
+        }
+        selected.clear();
+    }
+    let current = current.filter(|&i| i < players.len());
+    current
+        .filter(|&i| players[i].playing)
+        .or_else(|| players.iter().position(|p| p.playing))
+        .or(current)
+        .or_else(|| (!players.is_empty()).then_some(0))
+}
+
+fn player_name(source: &str) -> String {
+    let basename = source.rsplit(['\\', '/']).next().unwrap_or(source);
+    let lower = basename.to_ascii_lowercase();
+    if lower.contains("spotify") {
+        "Spotify".into()
+    } else if lower == "msedge.exe" {
+        "Microsoft Edge".into()
+    } else if lower == "chrome.exe" {
+        "Google Chrome".into()
+    } else if lower == "firefox.exe" {
+        "Firefox".into()
+    } else {
+        basename.trim_end_matches(".exe").to_owned()
+    }
+}
+
 fn worker(shared: &Arc<Shared>, receiver: mpsc::Receiver<Command>) -> Result<(), String> {
     let _apartment = Apartment::new()?;
     let manager = wait!(Manager::RequestAsync(), shared)?;
     let _manager_events = ManagerEvents::new(manager.clone(), shared)?;
     let mut session: Option<SessionEvents> = None;
+    let mut catalog: Vec<PlayerSession> = Vec::new();
+    let mut next_id = 1u64;
+    let mut selected = String::new();
     shared.notify(7);
     while let Ok(command) = receiver.recv() {
         if shared.stopping.load(Ordering::Acquire) || matches!(command, Command::Shutdown) {
             break;
         }
         let result = (|| -> Result<(), String> {
-            if matches!(command, Command::Refresh) {
-                let flags = shared.dirty.swap(0, Ordering::AcqRel);
+            if matches!(command, Command::Refresh | Command::Select(_)) {
+                let flags = if let Command::Select(id) = command {
+                    selected = id;
+                    7
+                } else {
+                    shared.dirty.swap(0, Ordering::AcqRel)
+                };
                 let mut changed = false;
+                let mut players = shared
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .players
+                    .clone();
                 if flags & 4 != 0 {
-                    let current = manager.GetCurrentSession().ok();
-                    if current.as_ref() != session.as_ref().map(|s| &s.session) {
+                    let available = manager.GetSessions().map_err(|e| e.to_string())?;
+                    let mut candidates = Vec::new();
+                    for index in 0..available.Size().map_err(|e| e.to_string())? {
+                        let candidate = available.GetAt(index).map_err(|e| e.to_string())?;
+                        let source = candidate
+                            .SourceAppUserModelId()
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        candidates.push((candidate, source));
+                    }
+                    let old_sources: Vec<_> = catalog.iter().map(|p| p.source.clone()).collect();
+                    let new_sources: Vec<_> = candidates
+                        .iter()
+                        .map(|(_, source)| source.clone())
+                        .collect();
+                    let mut next = Vec::new();
+                    let mut next_players = Vec::new();
+                    for (candidate, source) in candidates {
+                        let status = candidate
+                            .GetPlaybackInfo()
+                            .and_then(|info| info.PlaybackStatus());
+                        let Ok(status) = status else {
+                            continue;
+                        };
+                        if status == PlaybackStatus::Closed {
+                            continue;
+                        }
+                        let exact = catalog.iter().position(|p| p.session == candidate);
+                        // Windows can replace every session wrapper on a roster
+                        // update. A unique app source is unambiguous; preserve its
+                        // ID but rebind subscriptions to the replacement wrapper.
+                        // For multiple same-source sessions never guess identity.
+                        let unique = !source.is_empty()
+                            && old_sources.iter().filter(|s| *s == &source).count() == 1
+                            && new_sources.iter().filter(|s| *s == &source).count() == 1;
+                        let replaced = unique
+                            .then(|| catalog.iter().position(|p| p.source == source))
+                            .flatten();
+                        let entry = if let Some(old) = exact.or(replaced) {
+                            let old = catalog.remove(old);
+                            if exact.is_some() {
+                                old
+                            } else {
+                                PlayerSession::new(candidate.clone(), old.id.clone(), shared)?
+                            }
+                        } else {
+                            let entry =
+                                PlayerSession::new(candidate.clone(), next_id.to_string(), shared)?;
+                            next_id = next_id
+                                .checked_add(1)
+                                .ok_or("Session identity limit exceeded")?;
+                            entry
+                        };
+                        next_players.push(MediaPlayer {
+                            id: entry.id.clone(),
+                            name: player_name(&source),
+                            playing: status == PlaybackStatus::Playing,
+                        });
+                        next.push(entry);
+                    }
+                    // Drops subscriptions of removed sessions; surviving IDs remain stable.
+                    catalog = next;
+                    for i in 0..next_players.len() {
+                        let original = next_players[i].name.clone();
+                        if next_players
+                            .iter()
+                            .filter(|p| {
+                                p.name == original || p.name.starts_with(&format!("{original} · "))
+                            })
+                            .count()
+                            > 1
+                        {
+                            next_players[i].name = format!("{} · {}", original, next_players[i].id);
+                        }
+                    }
+                    players = next_players;
+                    let windows_current = manager.GetCurrentSession().ok();
+                    let current_index = catalog
+                        .iter()
+                        .position(|p| Some(&p.session) == windows_current.as_ref());
+                    let chosen = choose_player(&players, &mut selected, current_index)
+                        .map(|i| catalog[i].session.clone());
+                    if chosen.as_ref() != session.as_ref().map(|s| &s.session) {
                         session = None; // revoke the previous publisher's event tokens first
-                        if let Some(current) = current {
-                            session = Some(SessionEvents::new(current, shared)?);
+                        if let Some(chosen) = chosen {
+                            session = Some(SessionEvents::new(chosen, shared)?);
                         }
                         changed = true;
                     }
                 }
-                if let Some(session) = session.as_ref() {
-                    let snapshot = read_snapshot(
-                        &session.session,
-                        shared,
-                        flags & 2 != 0 || changed,
-                        changed,
-                    )?;
-                    shared.publish(snapshot);
+                let mut snapshot = if let Some(session) = session.as_ref() {
+                    read_snapshot(&session.session, shared, flags & 2 != 0 || changed, changed)?
                 } else {
-                    shared.publish(MediaSnapshot::default());
-                }
+                    MediaSnapshot::default()
+                };
+                snapshot.players = players;
+                snapshot.selected_player = selected.clone();
+                shared.publish(snapshot);
             } else if let Some(session) = session.as_ref() {
                 execute(&session.session, command, shared)?;
                 let snapshot = read_snapshot(&session.session, shared, false, false)?;
@@ -493,6 +688,10 @@ fn read_snapshot(
         let properties = wait!(session.TryGetMediaPropertiesAsync(), shared)?;
         snapshot.title = properties.Title().map_err(|e| e.to_string())?.to_string();
         snapshot.artist = properties.Artist().map_err(|e| e.to_string())?.to_string();
+        snapshot.album = properties
+            .AlbumTitle()
+            .map_err(|e| e.to_string())?
+            .to_string();
         if snapshot.title.is_empty() {
             snapshot.title = "Untitled media".into();
         }
@@ -524,4 +723,59 @@ fn read_artwork(
     })();
     let _ = stream.Close();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn players() -> Vec<MediaPlayer> {
+        vec![
+            MediaPlayer {
+                id: "1".into(),
+                name: "Browser".into(),
+                playing: false,
+            },
+            MediaPlayer {
+                id: "2".into(),
+                name: "Music".into(),
+                playing: true,
+            },
+            MediaPlayer {
+                id: "3".into(),
+                name: "Browser".into(),
+                playing: true,
+            },
+        ]
+    }
+    #[test]
+    fn automatic_follows_playback_and_windows_current_priority() {
+        let players = players();
+        let mut selected = String::new();
+        assert_eq!(choose_player(&players, &mut selected, Some(0)), Some(1));
+        assert_eq!(choose_player(&players, &mut selected, Some(2)), Some(2));
+        assert_eq!(choose_player(&players, &mut selected, None), Some(1));
+        assert!(selected.is_empty());
+    }
+    #[test]
+    fn explicit_selection_is_session_specific_even_with_same_player_name() {
+        let players = players();
+        let mut selected = "1".to_owned();
+        assert_eq!(choose_player(&players, &mut selected, Some(2)), Some(0));
+        assert_eq!(selected, "1");
+        selected = "3".into();
+        assert_eq!(choose_player(&players, &mut selected, Some(0)), Some(2));
+    }
+    #[test]
+    fn removed_player_falls_back_and_empty_catalog_is_safe() {
+        let mut selected = "removed".to_owned();
+        assert_eq!(choose_player(&players(), &mut selected, Some(0)), Some(1));
+        assert!(selected.is_empty());
+        assert_eq!(choose_player(&[], &mut selected, Some(20)), None);
+        let mut paused = players();
+        for player in &mut paused {
+            player.playing = false;
+        }
+        assert_eq!(choose_player(&paused, &mut selected, Some(2)), Some(2));
+        assert_eq!(choose_player(&paused, &mut selected, None), Some(0));
+    }
 }

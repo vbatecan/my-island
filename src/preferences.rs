@@ -14,13 +14,46 @@ pub fn populate(
     access: &str,
 ) {
     ui.set_appearance_index(s.appearance as i32);
+    ui.set_form_factor_index(s.form_factor.index());
+    ui.set_notch_corner_radius(s.notch_corner_radius.round() as i32);
+    ui.set_notch_contracted_radius(s.notch_contracted_radius.round() as i32);
+    ui.set_text_scale_percent((s.text_scale * 100.).round() as i32);
+    ui.set_fullscreen_always_hide_text(s.fullscreen_always_hide.join(", ").into());
+    ui.set_fullscreen_always_show_text(s.fullscreen_always_show.join(", ").into());
+    let state = match ui.get_preview_state() {
+        0 => crate::state::IslandState::Idle,
+        2 => crate::state::IslandState::Media,
+        _ => crate::state::IslandState::Expanded,
+    };
+    let geometry = state.geometry_for_sizes(
+        s.form_factor,
+        s.notch_corner_radius,
+        s.notch_contracted_radius,
+        s.canvas_size().0,
+        &s.sizes(),
+    );
+    let contour = crate::shape::ShapeContour::new(
+        geometry.width,
+        geometry.height,
+        geometry.radius,
+        s.form_factor,
+    );
+    ui.set_preview_width(contour.total_width() as f32);
+    ui.set_preview_height(geometry.height as f32);
+    ui.set_preview_path(contour.svg_commands().into());
+    ui.set_island_scale_percent((s.island_scale * 100.).round() as i32);
+    ui.set_launch_at_startup(s.launch_at_startup);
+    ui.set_battery_previews(s.battery_previews);
     ui.set_tint(s.opacity);
-    ui.set_bounce_index(match s.bounce {
-        Bounce::Soft => 0,
-        Bounce::Balanced => 1,
-        Bounce::Lively => 2,
-    });
+    ui.set_bounce_index(s.bounce.index());
+    ui.set_contracted_width(s.contracted_width.round() as i32);
+    ui.set_contracted_height(s.contracted_height.round() as i32);
+    ui.set_expanded_width(s.expanded_width.round() as i32);
+    ui.set_expanded_height(s.expanded_height.round() as i32);
+    ui.set_media_width(s.media_width.round() as i32);
+    ui.set_media_height(s.media_height.round() as i32);
     ui.set_animations_enabled(s.animations);
+    ui.set_animation_speed_percent((s.animation_speed * 100.).round() as i32);
     ui.set_follow_reduced_motion(s.follow_reduced_motion);
     ui.set_top_offset(s.offset.round() as i32);
     ui.set_island_always_on_top(s.topmost);
@@ -31,10 +64,17 @@ pub fn populate(
     ui.set_notification_duration(s.notification_duration as i32);
     ui.set_auto_volume(s.auto_volume);
     ui.set_compact_now_playing(s.compact_now_playing);
+    ui.set_online_lyrics(s.online_lyrics);
     ui.set_hover_expand(s.hover_expand);
     ui.set_hover_delay(s.hover_delay as i32);
+    ui.set_collapse_delay(s.collapse_delay as i32);
+    ui.set_scroll_volume(s.scroll_volume);
+    ui.set_middle_mute(s.middle_mute);
+    ui.set_volume_step(s.volume_step as i32);
     ui.set_outside_click(s.outside_click);
     ui.set_shortcut_enabled(s.shortcut_enabled);
+    ui.set_launcher_enabled(s.launcher_enabled);
+    ui.set_launcher_shortcut(s.launcher_shortcut as i32);
     ui.set_fullscreen_hide(s.fullscreen_hide);
     let mut names = vec!["Primary display (automatic)".into()];
     names.extend(monitors.iter().map(|m| m.name.clone().into()));
@@ -57,37 +97,52 @@ pub fn populate(
 }
 pub fn read(ui: &SettingsWindow, old: &Settings, monitors: &[MonitorInfo]) -> Settings {
     let mut s = old.clone();
-    s.appearance = match ui.get_appearance_index() {
-        1 => Appearance::Transparent,
-        2 => Appearance::Acrylic,
-        3 => Appearance::Glass,
-        4 => Appearance::LiveGlass,
-        _ => Appearance::Solid,
+    s.appearance = Appearance::from_index(ui.get_appearance_index());
+    s.form_factor = if ui.get_form_factor_index() == 1 {
+        crate::shape::FormFactor::Island
+    } else {
+        crate::shape::FormFactor::Notch
     };
-    s.opacity = ui.get_tint().clamp(0.15, 0.95);
-    s.bounce = match ui.get_bounce_index() {
-        0 => Bounce::Soft,
-        2 => Bounce::Lively,
-        _ => Bounce::Balanced,
-    };
+    s.battery_previews = ui.get_battery_previews();
+    s.notch_corner_radius = ui.get_notch_corner_radius() as f64;
+    s.notch_contracted_radius = ui.get_notch_contracted_radius() as f64;
+    s.text_scale = ui.get_text_scale_percent() as f64 / 100.;
+    s.fullscreen_always_hide =
+        crate::settings::executable_names(&ui.get_fullscreen_always_hide_text());
+    s.fullscreen_always_show =
+        crate::settings::executable_names(&ui.get_fullscreen_always_show_text());
+    s.island_scale = ui.get_island_scale_percent() as f64 / 100.;
+    s.launch_at_startup = ui.get_launch_at_startup();
+    s.opacity = ui.get_tint();
+    s.bounce = Bounce::from_index(ui.get_bounce_index());
+    s.contracted_width = ui.get_contracted_width() as f64;
+    s.contracted_height = ui.get_contracted_height() as f64;
+    s.expanded_width = ui.get_expanded_width() as f64;
+    s.expanded_height = ui.get_expanded_height() as f64;
+    s.media_width = ui.get_media_width() as f64;
+    s.media_height = ui.get_media_height() as f64;
     s.animations = ui.get_animations_enabled();
+    s.animation_speed = ui.get_animation_speed_percent() as f64 / 100.;
     s.follow_reduced_motion = ui.get_follow_reduced_motion();
-    s.offset = ui.get_top_offset().clamp(0, 80) as f64;
+    s.offset = ui.get_top_offset() as f64;
     s.topmost = ui.get_island_always_on_top();
     s.notifications_enabled = ui.get_notifications_enabled();
     s.notifications_paused = ui.get_notifications_paused();
-    s.privacy = match ui.get_privacy_index() {
-        1 => Privacy::Identity,
-        2 => Privacy::Body,
-        _ => Privacy::Title,
-    };
-    s.notification_duration = ui.get_notification_duration().clamp(3, 10) as u32;
+    s.privacy = Privacy::from_index(ui.get_privacy_index());
+    s.notification_duration = ui.get_notification_duration().max(0) as u32;
     s.auto_volume = ui.get_auto_volume();
     s.compact_now_playing = ui.get_compact_now_playing();
+    s.online_lyrics = ui.get_online_lyrics();
     s.hover_expand = ui.get_hover_expand();
-    s.hover_delay = ui.get_hover_delay().clamp(200, 600) as u32;
+    s.hover_delay = ui.get_hover_delay().max(0) as u32;
+    s.collapse_delay = ui.get_collapse_delay().max(0) as u32;
+    s.scroll_volume = ui.get_scroll_volume();
+    s.middle_mute = ui.get_middle_mute();
+    s.volume_step = ui.get_volume_step().max(0) as u32;
     s.outside_click = ui.get_outside_click();
     s.shortcut_enabled = ui.get_shortcut_enabled();
+    s.launcher_enabled = ui.get_launcher_enabled();
+    s.launcher_shortcut = ui.get_launcher_shortcut().max(0) as u32;
     s.fullscreen_hide = ui.get_fullscreen_hide();
     s.monitor_id = if ui.get_monitor_index() > 0 {
         monitors
@@ -97,6 +152,7 @@ pub fn read(ui: &SettingsWindow, old: &Settings, monitors: &[MonitorInfo]) -> Se
     } else {
         String::new()
     };
+    s.normalize();
     s
 }
 #[cfg(test)]
@@ -111,14 +167,26 @@ mod tests {
         assert!(!s.notifications_enabled);
         assert!(s.auto_volume && s.fullscreen_hide);
         assert_eq!(s.hover_delay, 350);
+        assert_eq!(s.notch_contracted_radius, 8.);
+        assert_eq!(s.island_scale, 1.);
+        assert!(!s.launch_at_startup);
     }
     #[test]
     fn all_settings_round_trip() {
-        let mut s = Settings::default();
-        s.monitor_id = "\\\\.\\DISPLAY2".into();
-        s.notifications_enabled = true;
-        s.blocked_apps = vec!["Example.App!App".into()];
-        s.privacy = Privacy::Identity;
+        let s = Settings {
+            monitor_id: "\\\\.\\DISPLAY2".into(),
+            notifications_enabled: true,
+            blocked_apps: vec!["Example.App!App".into()],
+            privacy: Privacy::Identity,
+            notch_contracted_radius: 6.,
+            notch_corner_radius: 17.,
+            island_scale: 1.25,
+            text_scale: 1.2,
+            fullscreen_always_hide: vec!["game.exe".into()],
+            fullscreen_always_show: vec!["player.exe".into()],
+            launch_at_startup: true,
+            ..Settings::default()
+        };
         assert_eq!(Settings::parse(&s.encode()).encode(), s.encode());
     }
     #[test]

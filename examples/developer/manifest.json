@@ -1,0 +1,38 @@
+{
+  "id": "org.stillisland.developer",
+  "name": "Developer sample",
+  "version": "0.1.0",
+  "api_version": 1,
+  "entrypoint": "still-island-plugin-developer.exe",
+  "background": false,
+  "capabilities": [
+    "native_ui",
+    "activities"
+  ],
+  "actions": [
+    {
+      "id": "increment",
+      "label": "Advance progress"
+    },
+    {
+      "id": "notify",
+      "label": "Preview activity"
+    },
+    {
+      "id": "toggle",
+      "label": "Toggle"
+    },
+    {
+      "id": "input",
+      "label": "Change text"
+    }
+  ],
+  "views": [
+    {
+      "id": "main",
+      "label": "Overview"
+    }
+  ],
+  "config": [],
+  "assets": []
+}

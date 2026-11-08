@@ -158,6 +158,21 @@ impl Spring {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn time_scaled_motion_preserves_the_spring_trajectory() {
+        let mut baseline = super::Spring::new(126.);
+        baseline.set_target(640.);
+        let mut slow = baseline;
+        let mut fast = baseline;
+        for _ in 0..40 {
+            baseline.advance(0.008);
+            slow.advance(0.016 * 0.5);
+            fast.advance(0.004 * 2.);
+            assert!((baseline.position - slow.position).abs() < 1e-10);
+            assert!((baseline.position - fast.position).abs() < 1e-10);
+            assert!((baseline.velocity - fast.velocity).abs() < 1e-10);
+        }
+    }
     use super::*;
 
     #[test]

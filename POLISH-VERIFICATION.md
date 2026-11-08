@@ -1,59 +1,96 @@
-# Polish verification — 2026-11-07
+# Reliability and customization polish
 
-This report supersedes the demo-only MVP behavior described in `VERIFICATION.md`.
+This report covers the current hover/fullscreen, media/lyrics, and customization work. The older reports describe earlier builds.
 
 ## Implemented
 
-- Real default-output Core Audio volume and mute, external volume notifications, and default-device rebinding.
-- Real GSMTC media metadata/artwork, capability-aware play/pause, previous/next, and seeking. No-session and unsupported controls are explicit; the UI does not invent successful transport actions.
-- Expanded usable volume panel and compact slider/mute; long-title-safe media layout, cover art, progress, and errors.
-- Persisted Solid, Transparent, Acrylic, Eco glass, and Live glass materials; tint presets; Soft/Balanced/Lively spring responses.
-- More visible expansion bounce, with stronger collapse damping and preserved interruption momentum. Tests bound the lively response within the canvas.
-- Eco glass uses excluded-window GDI desktop sampling on interaction/window events, with no capture worker/timer. Live glass uses optional WGC. Both use rounded SDF normals, vector Snell refraction, a soft backdrop prefilter, bilinear sampling, and Fresnel rim reflection.
-- Avoided native region changes when geometry is unchanged, coalesced capture frames, suppressed insignificant changes, and retained event-driven service workers.
+- Hover/collapse deadlines recheck the native cursor and current window hit target. External foreground/z-order/location changes also reconcile a stationary pointer, including unchanged fullscreen policy; these events do not rebuild desktop capture. DPI change events schedule a deferred pointer reconciliation. There is no hover polling timer at rest.
+- Per-executable fullscreen rules use limited-information process queries only when rules exist. Names are validated and normalized once, limited to 64 per list, persisted locally, and matched against the relevant foreground/top app on the selected monitor. Always hide takes precedence; Always show bypasses automatic fullscreen suppression. Session-lock hiding is unconditional.
+- Compact media uses available contour width, finite metadata/artwork feedback and a finite play/pause crossfade. Timeline-only updates do not restart decorative motion. Long expanded titles wrap within a bounded region; unavailable/live seeking has an explicit explanation and disabled hit target.
+- Lyrics keep seven stable slots with a continuous cursor. Current text grows as it enters focus, previous text shrinks upward, and stable row spacing reserves two wrapped lines without changing pitch per track. Long text is bounded with ellipsis. Blank timed rows show an instrumental/waiting hint. Seeking rebases immediately, normal line changes animate, and motion follows the saved speed/reduced-motion settings.
+- Appearance has a fitted live contour preview, finite cancelable motion preview, Balanced/Roomy/Larger text presets, independent 80–140% text size, existing overall zoom, advanced width/height/corner controls, and independent material tint. Presets preserve unrelated integrations and preferences. Invalid app names retain the user's edit for correction.
 
-## Build and actual integration tests
+## Build and automated evidence
 
-Windows11 Pro build26300,1920x1080 primary monitor at96DPI, NVIDIA GeForce RTX2050 driver32.0.16.2101. Rust1.99.1, Slint1.18.1, windows0.62.2.
+- `cargo check --workspace --locked`: passed.
+- `cargo test --workspace --locked --quiet`: 156 passed across the workspace; one optional live-provider test ignored. The deliberate invalid-artwork test prints a decoder error while passing its fallback assertions.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed after correcting a collapsible conditional.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+- `cargo build --release --locked`: passed on the final sources.
+- `scripts/test-polish.ps1`: all four offline regressions passed on the final release, with 145 assertions (18 interaction, 59 layout/settings, 55 lyrics, 13 media polish). The runner writes isolated profiles and logs under ignored `target/polish-probe/` and rejects missing completion markers, failed assertions, nonzero exits, or timeouts.
+- Screenshots were inspected for settings, 480px media at 140% text size, compact media, volume, battery, and timer. Review caught and corrected overlong lyrics losing their first words, text-row clipping, and stale validation feedback. The final narrow lyric snapshot begins at the first words and uses a trailing ellipsis.
+- Final solid-material media/lyrics checks confirm no additional renderer callbacks or morph/playback timers after settling. Live glass desktop capture is not covered by that idle assertion. No synthetic test is presented as proof of real game or video-player compatibility.
 
-Formatting/check/release build passed; **17 unit tests passed**. Added tests cover preset overshoot ordering/bounds, appearance persistence values, SDF normals, finite normalized refracted rays, normal incidence, bilinear interpolation, filtering invariants, and lens alpha/content. Existing convergence/retarget/timestep/settling/choreography tests remain passing. Release executable is about9.3MiB.
+## Verification scope
 
-Actual Windows service probes:
+| Requirement | Evidence to collect |
+| --- | --- |
+| Rapid pointer entry/exit, child controls, delayed collapse | Deterministic interaction regression and native pointer fixture |
+| DPI changes and window movement beneath a stationary pointer | Coordinate regression at 96/120/144/192 DPI; native window fixture; physical scaling separately reported |
+| Fullscreen hiding and restoration | Native normal/maximized/borderless fixture, attempted backend re-show, restore |
+| Per-application visibility overrides | Persisted settings tests and native fixture in automatic/hide/show modes |
+| Exclusive games, video players, multiple physical monitors | Report only runtime cases actually exercised; fixture geometry is not proof for these applications |
+| Adaptive compact media and unavailable seeking | Synthetic media snapshots, finite animation settling checks, rendered screenshots |
+| Lyrics wrapping, gaps, seek/track replacement and speed | Timeline unit tests, synthetic UI regression and rendered screenshots |
+| Preview, presets, independent text size and transparency | Persistence/migration tests, settings callbacks and rendered preview |
 
-- Core Audio read60%, wrote the same60%, readback60%, available=true, muted=false; callbacks and clean shutdown passed. No sound was produced and no intentional volume/mute change was made.
-- `scripts/test-media.ps1` passed play, pause, next+metadata, previous+metadata, and seek+timeline through **real Windows GSMTC**. Its hidden native SMTC fixture received five transport callbacks. The session disappeared after fixture closure. The probe refuses commands unless its own fixture is current; no user's media player was controlled and no audio engine was used. Raw results: `media-probe-results.txt`.
-- Borderless WGC captured real420x220 RGBA crops without permission prompts; shutdown passed.
-- An owned-window GDI fixture showed a blue backdrop and red overlay. Unexcluded capture saw red; after `WDA_EXCLUDEFROMCAPTURE`, capture saw the blue backdrop while the red overlay stayed displayed. This established the Eco path's underlying-desktop sampling without hiding/flickering the overlay.
+## Native runtime evidence
 
-All five material modes completed release `--verify` sequences, including rapid reversals and return to Idle with animation scheduling inactive. Captures are grouped under `verification/solid`, `transparent`, `acrylic`, `glass`, and `live-glass`. Rendered corners are transparent, dimensions remain anchored, and volume shows the real output value. Live/eco glass captures were visually inspected; backdrop text was softened by the final prefilter.
+On Windows with an NVIDIA GeForce RTX 2050 and one 1920×1080 display at 96 DPI:
 
-Native readbacks retained toolwindow/noactivate/topmost styles, absent appwindow style, unchanged foreground focus, and excluded empty canvas corners. Acrylic's DWM backdrop readback was3; other materials used1. Both glass modes used capture affinity0x11. Initial island-center hit routing passed in each mode. One Eco settled sample returned another window at the center despite a valid region/topmost style; a complete follow-up Eco run passed all center/corner samples. The cause of that transient was not established; other topmost windows and controlled manual boundary testing remain relevant. Logs preserve the evidence rather than treating the transient as a passing sample.
+- `scripts/test-fullscreen.ps1 -TraceHover`: all 19 stages passed. Three visits shorter than the configured 200ms dwell remained compact; a sustained visit expanded; six child-control crossings stayed expanded; pointer exit collapsed. A captioned window moved beneath the stationary notch retained hover. A topmost window covering the cursor cleared hover and collapsed; moving it away reopened after dwell.
+- Normal and maximized fixture windows kept the island visible. A borderless full-monitor fixture hid it. An attempted backend re-show remained hidden. Restoring the fixture restored the island.
+- `-FullscreenOverride Hide`: all five stages passed, including windowed hiding with automatic fullscreen detection disabled.
+- `-FullscreenOverride Show`: all four stages passed, including keeping the island visible over the fixture's fullscreen surface.
+- These runs had no detected external pointer interference. CSV artifacts are under ignored `verification/fullscreen-*.csv`, including monitor inventory. This supersedes the earlier report's inconclusive physical hover repetition.
 
-## Final release measurements
+The initial 19-stage native run preceded the final lyric-row clipping and test-fixture corrections. The subsequent monitor-aware run below exercised the final release again.
 
-Raw data: `polish-performance-{material}.csv`; phase summaries: `polish-{material}-benchmark.txt`. Maxima below include **all**100ms samples, including transitions. Private bytes are private committed memory (`PrivateMemorySize64`); working set includes shared resident pages (`WorkingSet64`). MiB means1,048,576bytes. CPU uses one logical core as100%; these short runs include the explicit10Hz verification orchestrator and local snapshot work.
+### Monitor-aware probe follow-up
 
-| Material | Maximum sampled private MiB | Maximum sampled working set MiB | Settled-return CPU |
-|---|---:|---:|---:|
-| Solid |76.18|86.75|1.54%|
-| Transparent |76.14|86.69|0.00%|
-| Acrylic |77.20|86.60|0.00%|
-| Eco glass |78.88|89.48|1.55%|
-| Live glass, optimized |79.94|95.06|0.00%|
+The probe now accepts `-MonitorId` and sequential `-AllMonitors` runs. Both the isolated island and owned fullscreen fixture target the same selected device. Unavailable device names are rejected instead of silently falling back to primary; output files are suffixed per device. An added native assertion checks the actual overlay's top-center position against that display's bounds.
 
-A follow-up Eco run measured78.71MiB private/89.23MiB working-set maximum and0% CPU during expanded/media/volume/settled phases. Source diagnostics confirmed `active=false` after each settling sequence. A short CPU sample can include service/Windows events; approximately-zero is not a guarantee that every interval is exactly zero.
+`scripts/test-fullscreen.ps1 -AllMonitors` passed all 20 stages on the final release on `\\.\DISPLAY1` at 96 DPI. Expected and actual physical horizontal centers were both 960. This repeated all hover/occlusion/fullscreen checks after the final UI changes. Windows PowerShell 5 runtime testing caught and corrected a single-result array-unwrapping bug in monitor selection.
 
-Rapid100ms reversals consumed about44% one-core CPU in Solid,63% in Eco, and65% in Live. These are stress workloads; actual presentation FPS was not measured. The preferred30/45/60MB memory goals remain missed. All final sampled maxima stayed below100decimalMB on this machine; Live's95.06MiB working set is about99.68decimalMB, leaving very little margin. Actual players/artwork, desktop activity, system policies, drivers, and scales can change this. No general100MB guarantee is made.
+The wrapper's `verification/fullscreen-all-monitors.csv` records DISPLAY1 as Passed and the secondary-monitor case as **Unavailable**, because only one monitor is connected. It does not count that entry as multi-monitor or mixed-DPI success. Per-display results are in `verification/fullscreen-hide-DISPLAY1.csv`. Windows display configuration and scaling were not altered.
 
-The initial hardware-D3D live-glass implementation peaked around126.64MiB private/111.89MiB working set and was too costly. Optimization tested hardware/WARP, pool sizes, cropped backing extents, and dirty reporting. The final path uses **WARP + one buffer + a cropped backing extent + dirty-region checks + a30FPS backdrop ceiling**, independently of morph scheduling. It only publishes when at least32 pixels differ by more than3 RGB levels against the last accepted frame. The isolated probe dropped from61 to17 published frames over8s. Isolated capture-process absolute memory stayed near53MiB, so that number must not be added to the application's baseline as incremental cost; the integrated WARP run demonstrated the actual reduction. No allocation profiler was used to attribute individual heaps. Eco mode avoids that live capture stack entirely.
+### Actual video playback
 
-GPU counters were not rerun for this revision. The original MVP GPU numbers are historical and are not evidence for the new materials. Desktop capture is event-driven, but Live mode must spend CPU/GPU resources when the backdrop changes. Eco deliberately freezes the backdrop between interaction/window events, including when a video underneath continues playing.
+`scripts/test-video-fullscreen.ps1` passed all three stages on the final release with installed VLC 3.0.24. It generated a local silent AVI and used isolated VLC/application preferences, disabled metadata network access, and a short-lived loopback control interface. No user recordings or existing player sessions were used.
 
-## Remaining limits
+| Actual VLC video state | Client bounds | Island |
+| --- | --- | --- |
+| Windowed | (264,239)–(424,329) | Visible |
+| Fullscreen Direct3D11 output | (0,0)–(1920,1080) | Hidden |
+| Windowed restored | (264,239)–(424,329) | Visible |
 
-- Desktop Computer Use discovery was attempted; the native pipe and browser host were unavailable. Controlled manual pointer/tray/Alt+Tab tests could not be performed. Native hit/style readbacks and renderer captures are separate evidence.
-- Additional physical DPI scales, display topology changes, device hotplug, other media providers, and fullscreen applications need broader device testing. No fullscreen auto-hide or startup registration.
-- DWM can choose an accessibility/power/inactive-policy fallback for native acrylic; accepted backdrop type alone does not prove identical visual blur under every policy.
-- Glass is excluded from ordinary screenshots/recordings to prevent self-capture feedback. Internal verifier snapshots still render it. Normal operation retains backdrop pixels only in RAM; explicit verification writes local images.
-- Borderless Live capture can be unavailable on other Windows builds/policies; it falls back to Acrylic and reports an error without requesting permission or changing system security settings.
-- The application does not implement playback; it controls a real publisher only when that publisher exposes a Windows media session and the requested capability.
+Playback time advanced from 0 to 2 to 4 seconds. This exercises VLC's actual video-output window using its dummy/control interfaces; it does not cover every Qt frontend interaction or exclusive presentation mode. Both owned processes and the control listener exited. Evidence is in ignored `verification/video-fullscreen.csv`. The user subsequently waived game testing.
+
+No memory or GPU benchmark is implied by a successful build or a synthetic UI test. The prior release memory measurements remain historical until a fresh measurement is performed.
+
+## Remaining physical compatibility matrix
+
+These cases require runtime evidence beyond the automated WinForms borderless fixture:
+
+| Case | Pass condition |
+| --- | --- |
+| Game modes | Game testing waived by the user; no game compatibility claim |
+| Other video players/browser video | VLC video-output case passed above; other frontends and players remain unverified |
+| Two physical monitors | Selected monitor fullscreen coverage wins even when focus moves to the other; ordinary selected-monitor windows prevent false suppression |
+| 100/125/150/200% display scaling | Physical pointer boundary agrees with the silhouette; moving displays/scaling while expanded does not retain stale hover or miscenter the island |
+
+Only one active physical display was found, and no installed game with confirmed exclusive-fullscreen support was identified. Record the application, actual mode, monitor arrangement and Windows scaling for each additional run. App rules are a compatibility fallback, not evidence that the underlying automatic detection worked.
+
+## Completion audit
+
+The current release and saved fixture results were inspected again after implementation. This is the status against each requested polish item:
+
+| Requested item | Current evidence | Remaining gap |
+| --- | --- | --- |
+| Dependable hover | 18 callback checks; real rapid visits, six child-control crossings, stationary-pointer occlusion/unocclusion and window movement all passed | Physical display-scale changes have not been exercised |
+| Fullscreen compatibility and per-app rules | Automatic/hide/show fixtures passed; actual VLC Direct3D11 fullscreen playback passed; rules persisted and validated | Game testing waived; second physical monitor unavailable |
+| Adaptive media | Compact and narrow expanded screenshots inspected at 140% text; finite metadata feedback and unsupported seek state passed | No known implementation gap from the audited fixtures |
+| Lyrics | 55 lyric checks plus media gap/seek/settling checks; long-line clipping corrected and final screenshot inspected | Coverage remains dependent on the selected player/provider, as described in README |
+| Customization | 59 layout/settings checks; preview, presets, independent typography/geometry/tint and validation exercised | No known implementation gap from the audited fixtures |
+
+The physical scaling and multi-monitor items remain unverified, rather than being inferred from the coordinate unit tests or single-display native fixtures. Existing positive results do not need another release build unless production sources change.

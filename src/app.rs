@@ -1,3 +1,32 @@
+mod artwork;
+mod battery_verification;
+mod contracted_verification;
+mod interaction;
+mod launcher;
+mod layout_verification;
+mod lyrics;
+mod lyrics_verification;
+mod material;
+mod media;
+mod media_polish_verification;
+mod notification_bridge;
+mod page_verification;
+mod pages;
+mod plugins;
+mod settings_ui;
+mod size_verification;
+mod startup;
+mod verification;
+mod volume;
+
+use interaction::handle_overlay_input;
+use material::{configure_material, refresh_eco_glass};
+use media::sync_media_clock;
+use settings_ui::{
+    apply_settings, close_preferences, refresh_preferences, settings_status, show_preferences,
+};
+use verification::record;
+
 use crate::animation::choreography::{compact_space, expanded_space};
 use crate::{IslandWindow, animation::Spring, platform, settings::Settings, state::IslandState};
 use crate::{
@@ -30,12 +59,18 @@ use std::{
 };
 
 struct App {
+    launcher: launcher::Controller,
+    plugin_host: Option<Arc<crate::plugins::PluginHost>>,
     ui: slint::Weak<IslandWindow>,
     state: IslandState,
     springs: [Spring; 5],
     timer: slint::Timer,
     last: Instant,
     settings: Settings,
+    canvas_size: (f64, f64),
+    startup: platform::startup::StartupStatus,
+    startup_busy: bool,
+    startup_pending: Option<bool>,
     hover: bool,
     pending_content: Option<IslandState>,
     pending_compact: Option<IslandState>,
@@ -44,7 +79,9 @@ struct App {
     frames: u64,
     volume: Option<Rc<VolumeService>>,
     media: Option<Rc<MediaService>>,
+    lyrics: lyrics::Controller,
     media_clock: slint::Timer,
+    media_clock_compact: bool,
     media_position: (f64, f64, Instant),
     glass: RefCell<Glass>,
     capture: Option<platform::capture::CaptureService>,
@@ -58,6 +95,16 @@ struct App {
     epoch: Instant,
     deadline: slint::Timer,
     hover_timer: slint::Timer,
+    collapse_timer: slint::Timer,
+    page_switch_timer: slint::Timer,
+    page_wheel: pages::PageWheel,
+    hover_intent: crate::hover::HoverIntent,
+    pointer: Option<(f64, f64)>,
+    pointer_pressed: bool,
+    wheel: crate::gestures::WheelVolume,
+    countdown: crate::countdown::Countdown,
+    countdown_timer: slint::Timer,
+    countdown_engaged: bool,
     hidden: bool,
     settings_visible: bool,
     settings_sync: bool,
@@ -68,6 +115,8 @@ struct App {
     notification_scheduled: Arc<AtomicBool>,
     observed_apps: Vec<(String, String)>,
     metrics: Rc<crate::metrics::RenderMetrics>,
+    battery: crate::services::battery::BatterySnapshot,
+    battery_detector: crate::services::battery::BatteryDetector,
 }
 impl App {
     fn now(&self) -> u64 {
@@ -88,7 +137,8 @@ impl App {
         {
             self.apply_pending_presentation();
         }
-        let g = state.geometry();
+        let g = self.geometry(state);
+        self.update_media_layout();
         let collapsing = g.height < self.springs[1].position;
         for spring in &mut self.springs[..3] {
             spring.config.damping = self.settings.bounce.damping(collapsing);
@@ -121,13 +171,7 @@ impl App {
         self.springs[3].set_target(0.0);
         self.springs[4].set_target(0.0);
         self.pending_compact = None;
-        if matches!(
-            state,
-            IslandState::Expanded
-                | IslandState::Media
-                | IslandState::Volume
-                | IslandState::Notification
-        ) {
+        if state.is_expanded() {
             self.pending_content = Some(state);
         } else {
             self.pending_content = None;
@@ -139,19 +183,7 @@ impl App {
             for spring in &mut self.springs[..3] {
                 spring.snap(spring.target);
             }
-            self.springs[3].snap(
-                if matches!(
-                    state,
-                    IslandState::Expanded
-                        | IslandState::Media
-                        | IslandState::Volume
-                        | IslandState::Notification
-                ) {
-                    1.0
-                } else {
-                    0.0
-                },
-            );
+            self.springs[3].snap(if state.is_expanded() { 1.0 } else { 0.0 });
             self.springs[4].snap(
                 if matches!(state, IslandState::Compact | IslandState::Volume) {
                     1.0
@@ -164,29 +196,90 @@ impl App {
             self.render();
         }
     }
-    fn apply_pending_presentation(&mut self) {
-        if let Some(view) = self.pending_presentation.take() {
-            if let Some(ui) = self.ui.upgrade() {
-                apply_content_properties(&ui, &view, &self.settings);
-                self.rendered_presentation = Some(view);
+    fn geometry(&self, state: IslandState) -> crate::state::Geometry {
+        state.geometry_for_sizes(
+            self.settings.form_factor,
+            self.settings.notch_corner_radius,
+            self.settings.notch_contracted_radius,
+            platform::available_width() / self.settings.island_scale,
+            &self.settings.sizes(),
+        )
+    }
+    fn sync_canvas(&mut self, shrink: bool) -> bool {
+        let requested = self.settings.canvas_size();
+        let next = if shrink {
+            requested
+        } else {
+            (
+                self.canvas_size.0.max(requested.0),
+                self.canvas_size.1.max(requested.1),
+            )
+        };
+        let changed = next != self.canvas_size;
+        self.canvas_size = next;
+        changed
+    }
+
+    fn update_media_layout(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            let media = self.geometry(IslandState::Media);
+            ui.set_media_layout_width(media.width as f32);
+            ui.set_media_layout_height(media.height as f32);
+            let plugin = self.geometry(IslandState::Plugin);
+            ui.set_plugin_layout_width((plugin.width - 48.).max(1.) as f32);
+        }
+    }
+
+    /// Retarget only the contour when preferences or display geometry change.
+    /// Content and all spring velocities survive the change.
+    fn retarget_shape(&mut self) {
+        let g = self.geometry(self.state);
+        self.update_media_layout();
+        let target = [
+            g.width
+                + if self.state == IslandState::Idle && self.hover {
+                    4.
+                } else {
+                    0.
+                },
+            g.height,
+            g.radius,
+        ];
+        if self.pending_geometry.is_some() {
+            self.pending_geometry = Some(target);
+        } else {
+            let animate = self.animations_enabled();
+            for (spring, target) in self.springs[..3].iter_mut().zip(target) {
+                spring.set_target(target);
+                if !animate {
+                    spring.snap(target);
+                }
             }
+        }
+    }
+    fn apply_pending_presentation(&mut self) {
+        if let Some(view) = self.pending_presentation.take()
+            && let Some(ui) = self.ui.upgrade()
+        {
+            apply_content_properties(&ui, &view, &self.settings);
+            self.rendered_presentation = Some(view);
         }
     }
     fn apply_content(&mut self) {
         self.apply_pending_presentation();
-        if let Some(state) = self.pending_content.take() {
-            if let Some(ui) = self.ui.upgrade() {
-                ui.set_media_mode(state == IslandState::Media);
-                ui.set_volume_mode(state == IslandState::Volume);
-            }
+        if let Some(state) = self.pending_content.take()
+            && let Some(ui) = self.ui.upgrade()
+        {
+            ui.set_media_mode(state == IslandState::Media);
+            ui.set_volume_mode(state == IslandState::Volume);
         }
     }
     fn apply_compact(&mut self) {
         self.apply_pending_presentation();
-        if let Some(state) = self.pending_compact.take() {
-            if let Some(ui) = self.ui.upgrade() {
-                ui.set_volume_mode(state == IslandState::Volume);
-            }
+        if let Some(state) = self.pending_compact.take()
+            && let Some(ui) = self.ui.upgrade()
+        {
+            ui.set_volume_mode(state == IslandState::Volume);
         }
     }
     fn tick(&mut self) -> bool {
@@ -196,7 +289,7 @@ impl App {
             self.apply_pending_presentation();
         }
         let now = Instant::now();
-        let dt = now.duration_since(self.last).as_secs_f64();
+        let dt = now.duration_since(self.last).as_secs_f64() * self.settings.animation_speed;
         self.last = now;
         if self.pending_content.is_some()
             && self.springs[3].position.max(self.springs[4].position) < 0.01
@@ -217,14 +310,7 @@ impl App {
                 spring.set_target(target);
             }
         }
-        let expanded = self.pending_content.is_none()
-            && matches!(
-                self.state,
-                IslandState::Expanded
-                    | IslandState::Media
-                    | IslandState::Volume
-                    | IslandState::Notification
-            );
+        let expanded = self.pending_content.is_none() && self.state.is_expanded();
         let compact = self.pending_compact.is_none()
             && matches!(self.state, IslandState::Compact | IslandState::Volume);
         // Space gates are continuous, so a reversal never pops content into a small capsule.
@@ -263,9 +349,24 @@ impl App {
             return;
         }
         if let Some(ui) = self.ui.upgrade() {
+            ui.set_ui_scale(self.settings.island_scale as f32);
+            ui.set_text_scale(self.settings.text_scale as f32);
+            ui.set_media_motion_enabled(self.animations_enabled());
+            ui.set_canvas_width(self.canvas_size.0 as f32);
+            ui.set_canvas_height(self.canvas_size.1 as f32);
+            ui.set_animation_speed(self.settings.animation_speed as f32);
             ui.set_shape_width(self.springs[0].position as f32);
             ui.set_shape_height(self.springs[1].position as f32);
             ui.set_shape_radius(self.springs[2].position as f32);
+            let contour = crate::shape::ShapeContour::new(
+                self.springs[0].position,
+                self.springs[1].position,
+                self.springs[2].position,
+                self.settings.form_factor,
+            );
+            ui.set_form_notch(self.settings.form_factor == crate::shape::FormFactor::Notch);
+            ui.set_shoulder(contour.shoulder() as f32);
+            ui.set_shape_path(contour.svg_commands().into());
             let width = self.springs[0].position;
             let height = self.springs[1].position;
             let reveal = self.springs[3].position.clamp(0.0, 1.0) * expanded_space(width, height);
@@ -285,11 +386,13 @@ impl App {
                 self.settings.appearance,
                 Appearance::Glass | Appearance::LiveGlass
             ) {
-                let image = self.glass.borrow_mut().image(
+                let image = self.glass.borrow_mut().image_in_canvas(
                     width,
                     height,
                     self.springs[2].position,
-                    ui.window().scale_factor(),
+                    ui.window().scale_factor() * self.settings.island_scale as f32,
+                    self.settings.form_factor,
+                    self.canvas_size.0,
                 );
                 ui.set_glass_texture(image);
                 ui.set_has_glass_texture(true);
@@ -303,6 +406,10 @@ impl App {
                 self.springs[2].position,
                 self.settings.offset,
                 self.settings.topmost,
+                self.settings.form_factor,
+                self.settings.island_scale,
+                self.canvas_size.0,
+                self.canvas_size.1,
             );
         }
     }
@@ -336,11 +443,16 @@ fn wake(app: &Rc<RefCell<App>>) {
                 if !active {
                     app.borrow().timer.stop();
                     app.borrow().metrics.active(false);
+                    if app.borrow_mut().sync_canvas(true) {
+                        configure_material(&app);
+                    }
                 }
+                interaction::refresh_pointer(&app);
             }
         },
     );
 }
+
 fn morph_to(app: &Rc<RefCell<App>>, state: IslandState) {
     refresh_eco_glass(app);
     app.borrow_mut().target(state);
@@ -367,67 +479,111 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let preferences = SettingsWindow::new()?;
     let mut settings = Settings::load();
     for arg in std::env::args() {
+        if let Some(v) = arg.strip_prefix("--form=") {
+            settings.form_factor = crate::shape::FormFactor::parse(v);
+        }
         if let Some(v) = arg.strip_prefix("--appearance=") {
             settings.appearance = Appearance::parse(v);
         }
-        if let Some(v) = arg.strip_prefix("--opacity=") {
-            if let Ok(v) = v.parse::<f32>() {
-                if v.is_finite() {
-                    settings.opacity = v.clamp(0.15, 0.95);
-                }
-            }
+        if let Some(v) = arg.strip_prefix("--opacity=")
+            && let Ok(v) = v.parse::<f32>()
+            && v.is_finite()
+        {
+            settings.opacity = v.clamp(0.15, 0.95);
         }
         if let Some(v) = arg.strip_prefix("--bounce=") {
             settings.bounce = crate::settings::Bounce::parse(v);
         }
     }
-    if std::env::args()
-        .any(|a| a == "--verify" || a == "--verify-notifications" || a == "--verify-settings")
-    {
+    settings.normalize();
+    if verification::enabled() {
+        settings.selected_page = None;
         settings.auto_volume = false;
         settings.compact_now_playing = false;
         settings.notifications_enabled = false;
         settings.hover_expand = false;
+        // Verification drives the GUI directly; real desktop clicks, hotkeys,
+        // and foreground changes must not interrupt its deterministic stages.
+        settings.outside_click = false;
+        settings.shortcut_enabled = false;
+        settings.launcher_enabled = false;
+        settings.fullscreen_hide = false;
     }
-    if std::env::args().any(|a| a == "--benchmark") {
+    if verification::has_arg("--verify-interactions") {
+        settings.hover_expand = true;
+        settings.hover_delay = 200;
+        settings.collapse_delay = 150;
+    }
+    if verification::has_arg("--benchmark") {
         settings.notifications_enabled = false;
     }
+    let initial_geometry = IslandState::Idle.geometry_for_sizes(
+        settings.form_factor,
+        settings.notch_corner_radius,
+        settings.notch_contracted_radius,
+        platform::available_width() / settings.island_scale,
+        &settings.sizes(),
+    );
+    let canvas_size = settings.canvas_size();
+    let mut coordinator = PresentationCoordinator::default();
+    coordinator.set_selected_page(settings.selected_page.clone(), 0);
     let app = Rc::new(RefCell::new(App {
+        launcher: launcher::Controller::default(),
+        plugin_host: None,
         ui: ui.as_weak(),
         state: IslandState::Idle,
         springs: [
-            Spring::new(126.0),
-            Spring::new(32.0),
-            Spring::new(16.0),
+            Spring::new(initial_geometry.width),
+            Spring::new(initial_geometry.height),
+            Spring::new(initial_geometry.radius),
             content_spring(),
             content_spring(),
         ],
         timer: slint::Timer::default(),
         last: Instant::now(),
         settings,
+        canvas_size,
+        startup: platform::startup::StartupStatus {
+            enabled: false,
+            available: false,
+            message: "Checking Windows startup registration…".into(),
+        },
+        startup_busy: false,
+        startup_pending: None,
         hover: false,
         pending_content: None,
         pending_compact: None,
         pending_geometry: None,
-        verification: std::env::args()
-            .any(|a| a == "--verify" || a == "--verify-notifications" || a == "--verify-settings"),
+        verification: verification::enabled(),
         frames: 0,
         volume: None,
         media: None,
+        lyrics: lyrics::Controller::default(),
         media_clock: slint::Timer::default(),
+        media_clock_compact: false,
         media_position: (0., 0., Instant::now()),
         glass: RefCell::new(Glass::default()),
         capture: None,
         incoming_frame: Arc::new(Mutex::new(None)),
         frame_scheduled: Arc::new(AtomicBool::new(false)),
         preferences: preferences.as_weak(),
-        coordinator: PresentationCoordinator::default(),
+        coordinator,
         presentation: None,
         pending_presentation: None,
         rendered_presentation: None,
         epoch: Instant::now(),
         deadline: slint::Timer::default(),
         hover_timer: slint::Timer::default(),
+        collapse_timer: slint::Timer::default(),
+        page_switch_timer: slint::Timer::default(),
+        page_wheel: pages::PageWheel::default(),
+        hover_intent: crate::hover::HoverIntent::default(),
+        pointer: None,
+        pointer_pressed: false,
+        wheel: crate::gestures::WheelVolume::default(),
+        countdown: crate::countdown::Countdown::default(),
+        countdown_timer: slint::Timer::default(),
+        countdown_engaged: false,
         hidden: false,
         settings_visible: false,
         settings_sync: false,
@@ -438,17 +594,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         notification_scheduled: Arc::new(AtomicBool::new(false)),
         observed_apps: vec![],
         metrics: Rc::new(crate::metrics::RenderMetrics::default()),
+        battery: crate::services::battery::BatterySnapshot::default(),
+        battery_detector: crate::services::battery::BatteryDetector::default(),
     }));
-    if app.borrow().verification {
-        let metrics = app.borrow().metrics.clone();
-        if let Err(e) = ui
-            .window()
-            .set_rendering_notifier(move |state, _| metrics.frame(state))
-        {
-            record(&format!("render metrics unavailable: {e:?}"));
-        }
-    }
-    platform::set_animation_preference(app.borrow().settings.animations);
+    verification::install_metrics(&app, &ui);
     app.borrow().render();
     {
         let app = app.clone();
@@ -458,199 +607,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let app = app.clone();
         ui.on_collapse(move || transition(&app, IslandState::Idle));
     }
+    // Services notify the GUI; all remote work stays on their sleeping workers.
+    volume::wire(&app, &ui);
+    media::wire(&app, &ui);
+    lyrics::wire(&app, &ui);
+    material::wire(&app, &ui);
+    plugins::wire(&app, &ui, &preferences);
+    launcher::wire(&app, &ui);
     {
         let app = app.clone();
-        ui.on_open_media(move || {
-            if let Some(media) = app.borrow().media.clone() {
-                media.refresh();
-            }
-            transition(&app, IslandState::Media);
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_open_volume(move || transition(&app, IslandState::Volume));
-    }
-    {
-        let app = app.clone();
-        ui.on_hover(move |hover| {
-            let (idle, expand, delay) = {
-                let mut a = app.borrow_mut();
-                a.hover = hover;
-                let now = a.now();
-                a.coordinator.set_hover(hover, now);
-                (
-                    a.state == IslandState::Idle,
-                    a.settings.hover_expand,
-                    a.settings.hover_delay,
-                )
-            };
-            if idle {
-                let mut a = app.borrow_mut();
-                let state = a.state;
-                a.target(state);
-                drop(a);
-                wake(&app);
-            }
-            app.borrow().hover_timer.stop();
-            if hover && expand {
-                let weak = Rc::downgrade(&app);
-                app.borrow().hover_timer.start(
-                    slint::TimerMode::SingleShot,
-                    Duration::from_millis(delay as u64),
-                    move || {
-                        if let Some(app) = weak.upgrade() {
-                            if app.borrow().hover
-                                && !app.borrow().hidden
-                                && !app.borrow().settings_visible
-                                && !app.borrow().coordinator.panel_open()
-                            {
-                                transition(&app, IslandState::Expanded);
-                            }
-                        }
-                    },
-                );
-            }
-            sync_presentation(&app);
-        });
-    }
-    // Services notify the Slint event loop; remote COM/WinRT work stays off the GUI thread.
-    {
-        let weak = ui.as_weak();
-        match VolumeService::new(move |event| {
-            let v = event.snapshot;
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                ui.set_volume(v.percent);
-                ui.set_volume_muted(v.muted);
-                ui.set_volume_available(v.available);
-                ui.invoke_volume_updated(event.origin == VolumeOrigin::External);
-            });
-        }) {
-            Ok(service) => {
-                if let Ok(v) = service.snapshot() {
-                    ui.set_volume(v.percent);
-                    ui.set_volume_muted(v.muted);
-                    ui.set_volume_available(v.available);
-                }
-                app.borrow_mut().volume = Some(Rc::new(service));
-            }
-            Err(e) => ui.set_service_status(e.into()),
-        }
-    }
-    {
-        let weak = ui.as_weak();
-        match MediaService::new(move |snapshot| {
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                apply_media(&ui, &snapshot);
-                ui.invoke_media_updated();
-            });
-        }) {
-            Ok(service) => {
-                apply_media(&ui, &service.snapshot());
-                app.borrow_mut().media = Some(Rc::new(service));
-            }
-            Err(e) => ui.set_service_status(e.into()),
-        }
-    }
-    {
-        let app = app.clone();
-        ui.on_volume_change(move |v| {
-            let service = app.borrow().volume.clone();
-            if let Some(service) = service {
-                if let Err(e) = service.set_volume(v) {
-                    status(&app, &e);
-                }
-            }
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_toggle_mute(move || {
-            let service = app.borrow().volume.clone();
-            if let Some(service) = service {
-                if let Err(e) = service.toggle_mute() {
-                    status(&app, &e);
-                }
-            }
-        });
-    }
-    for command in 0..3 {
-        let app = app.clone();
-        let callback = move || {
-            let service = app.borrow().media.clone();
-            if let Some(service) = service {
-                let result = match command {
-                    0 => service.play_pause(),
-                    1 => service.previous(),
-                    _ => service.next(),
-                };
-                if let Err(e) = result {
-                    status(&app, &e);
-                }
-            }
-        };
-        match command {
-            0 => ui.on_play_pause(callback),
-            1 => ui.on_previous(callback),
-            2 => ui.on_next(callback),
-            _ => {}
-        }
-    }
-    {
-        let app = app.clone();
-        ui.on_seek(move |fraction| {
-            let service = app.borrow().media.clone();
-            let duration = app.borrow().media_position.1;
-            if let Some(service) = service {
-                if let Err(e) = service.seek(fraction as f64 * duration) {
-                    status(&app, &e);
-                }
-            }
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_media_updated(move || {
-            let ui = app.borrow().ui.upgrade();
-            if let Some(ui) = ui {
-                app.borrow_mut().media_position = (
-                    ui.get_position_seconds() as f64,
-                    ui.get_duration_seconds() as f64,
-                    Instant::now(),
-                );
-            }
-            {
-                let mut a = app.borrow_mut();
-                let now = a.now();
-                let media = a.settings.compact_now_playing
-                    && a.ui
-                        .upgrade()
-                        .is_some_and(|ui| ui.get_media_available() && ui.get_playing());
-                a.coordinator.set_media(media, now);
-            }
-            sync_media_clock(&app);
-            sync_presentation(&app);
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_backdrop_updated(move || {
-            let frame = {
-                let a = app.borrow();
-                let mut frame = a.incoming_frame.lock().unwrap_or_else(|e| e.into_inner());
-                a.frame_scheduled.store(false, Ordering::Release);
-                frame.take()
-            };
-            if let Some(frame) = frame {
-                let a = app.borrow();
-                if a.settings.appearance == Appearance::LiveGlass {
-                    let changed = a.glass.borrow_mut().set_backdrop(frame);
-                    if changed {
-                        a.render();
-                    }
-                }
-            }
-        });
+        ui.on_open_battery(move || transition(&app, IslandState::Battery));
     }
     let event_app = app.clone();
     platform::set_event_handler(Box::new(move |event| {
@@ -662,6 +628,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 event_app.borrow().render();
             }
+            Event::Battery(snapshot) => {
+                if !event_app.borrow().verification {
+                    update_battery(&event_app, snapshot);
+                }
+            }
             Event::Reset => transition(&event_app, IslandState::Idle),
             Event::State(state) => transition(&event_app, state),
             Event::Exit => {
@@ -671,22 +642,39 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Event::DisplayChanged => {
                 configure_material(&event_app);
                 refresh_preferences(&event_app);
-                if !event_app.borrow().animations_enabled() {
-                    let mut a = event_app.borrow_mut();
-                    let state = a.state;
-                    a.target(state);
-                    a.timer.stop();
+                event_app.borrow_mut().retarget_shape();
+                wake(&event_app);
+                lyrics::sync(&event_app, false);
+                interaction::refresh_pointer(&event_app);
+                if event_app.borrow().launcher.open {
+                    launcher::refresh(&event_app);
                 }
             }
             Event::BackdropRefresh => refresh_eco_glass(&event_app),
             Event::OpenSettings => show_preferences(&event_app),
             Event::ClosePanel => {
-                if !event_app.borrow().settings_visible {
+                if event_app.borrow().launcher.open {
+                    launcher::dismiss(&event_app, false);
+                    return;
+                }
+                if !event_app.borrow().settings_visible && !event_app.borrow().coordinator.pinned()
+                {
                     transition(&event_app, IslandState::Idle);
                 }
             }
             Event::HotkeyToggle => user_toggle(&event_app),
+            Event::LauncherToggle => launcher::toggle(&event_app),
             Event::DesktopPolicyChanged(hidden) => {
+                if hidden == event_app.borrow().hidden {
+                    // External foreground/z-order changes can move a window over
+                    // a stationary pointer. Reconcile without rebuilding capture
+                    // or rescheduling presentation when visibility did not change.
+                    interaction::refresh_pointer(&event_app);
+                    return;
+                }
+                if hidden && event_app.borrow().launcher.open {
+                    launcher::dismiss(&event_app, false);
+                }
                 let old = {
                     let mut a = event_app.borrow_mut();
                     a.hidden = hidden;
@@ -694,6 +682,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let suppress = hidden || a.settings_visible;
                     a.coordinator.suppress(suppress, now);
                     if hidden {
+                        if let Some(ui) = a.ui.upgrade() {
+                            ui.set_media_motion_enabled(false);
+                        }
+                        a.hover = false;
+                        a.pointer = None;
+                        a.pointer_pressed = false;
+                        a.hover_intent.leave();
+                        a.hover_timer.stop();
+                        a.collapse_timer.stop();
+                        a.coordinator.set_hover(false, now);
+                        a.coordinator.close_hover(now);
                         a.timer.stop();
                         a.media_clock.stop();
                         a.capture.take()
@@ -707,24 +706,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 sync_presentation(&event_app);
                 sync_media_clock(&event_app);
-            }
-            Event::ToggleAnimations
-            | Event::ToggleTopmost
-            | Event::Offset(_)
-            | Event::Appearance(_)
-            | Event::Opacity(_)
-            | Event::Bounce(_) => {
-                let mut settings = event_app.borrow().settings.clone();
-                match event {
-                    Event::ToggleAnimations => settings.animations = !settings.animations,
-                    Event::ToggleTopmost => settings.topmost = !settings.topmost,
-                    Event::Offset(v) => settings.offset = v,
-                    Event::Appearance(v) => settings.appearance = v,
-                    Event::Opacity(v) => settings.opacity = v,
-                    Event::Bounce(v) => settings.bounce = v,
-                    _ => {}
-                }
-                apply_settings(&event_app, settings, true);
+                interaction::refresh_pointer(&event_app);
             }
         }
     }));
@@ -742,11 +724,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ => return Err("Windows HWND required".into()),
             };
             platform::attach(hwnd)?;
+            if let Ok(snapshot)=platform::power::snapshot(){update_battery(&init_app,snapshot);}
             init_app.borrow_mut().attached=true;
             let settings=init_app.borrow().settings.clone();apply_settings(&init_app,settings,false);
             configure_material(&init_app);
             // Deterministic opt-in test runs ignore live pointer input; normal use is unchanged.
-            if std::env::args().any(|a| a == "--verify" || a == "--verify-notifications" || a=="--verify-settings" || a == "--benchmark" || a=="--verify-settings") {
+            if verification::blocks_live_input() {
                 use slint::winit_030::{EventResult, winit::event::WindowEvent};
                 ui.window().on_winit_window_event(|_, event| match event {
                     WindowEvent::MouseInput { .. }
@@ -757,8 +740,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     | WindowEvent::Touch { .. } => EventResult::PreventDefault,
                     _ => EventResult::Propagate,
                 });
+            } else {
+                let weak = Rc::downgrade(&init_app);
+                ui.window().on_winit_window_event(move |_, event| {
+                    if let Some(app) = weak.upgrade() { handle_overlay_input(&app,event) }
+                    else { slint::winit_030::EventResult::Propagate }
+                });
             }
             init_app.borrow().render();
+            interaction::refresh_pointer(&init_app);
             if let Some(state) =
                 std::env::args().find_map(|a| a.strip_prefix("--demo-state=").map(str::to_owned))
             {
@@ -787,121 +777,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = slint::quit_event_loop();
         }
     })?;
-    wire_new_features(&app, &ui, &preferences);
+    interaction::wire(&app, &ui);
+    settings_ui::wire(&app, &ui, &preferences);
+    startup::refresh(&app);
+    notification_bridge::wire(&app, &ui);
     ui.show()?;
     app.borrow().render();
-    if std::env::args().any(|a| a == "--verify-settings") {
-        let weak = Rc::downgrade(&app);
-        slint::Timer::single_shot(Duration::from_millis(700), move || {
-            if let Some(app) = weak.upgrade() {
-                show_preferences(&app);
-            }
-        });
-        let weak = Rc::downgrade(&app);
-        slint::Timer::single_shot(Duration::from_millis(1800), move || {
-            if let Some(app) = weak.upgrade() {
-                let ui = app.borrow().preferences.upgrade();
-                if let Some(ui) = ui {
-                    match crate::verification::snapshot_preferences(&ui) {
-                        Ok(path) => record(&format!("settings snapshot {}", path.display())),
-                        Err(e) => record(&format!("settings FAILED {e}")),
-                    };
-                    use slint::winit_030::WinitWindowAccessor;
-                    ui.window().with_winit_window(|window|{if let Ok(handle)=window.window_handle(){if let RawWindowHandle::Win32(handle)=handle.as_raw(){let hwnd=windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut _);unsafe{record(&format!("settings focused={} noactivate={}",windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()==hwnd,windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd,windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE) as u32 & windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE.0 !=0));}}}});
-                }
-            }
-        });
-        let weak = Rc::downgrade(&app);
-        slint::Timer::single_shot(Duration::from_millis(2600), move || {
-            if let Some(app) = weak.upgrade() {
-                close_preferences(&app, true);
-            }
-        });
-    }
-    let verification_timer = slint::Timer::default();
-    if app.borrow().verification {
-        record(&format!("startup {}", platform::diagnostic_snapshot()));
-        let app = app.clone();
-        let started = Instant::now();
-        let mut stage = 0u32;
-        verification_timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_millis(100),
-            move || {
-                let t = started.elapsed().as_millis();
-                let next = if t < 3000 {
-                    0
-                } else if t < 6000 {
-                    1
-                } else if t < 9000 {
-                    2
-                } else if t < 12000 {
-                    3
-                } else if t < 14000 {
-                    4 + ((t - 12000) / 100) as u32
-                } else if t < 18000 {
-                    24
-                } else {
-                    25
-                };
-                if next != stage {
-                    stage = next;
-                    if matches!(stage, 1..=4 | 25) {
-                        if let Some(ui) = app.borrow().ui.upgrade() {
-                            let name =
-                                if std::env::args().any(|arg| arg == "--verify-notifications") {
-                                    match stage {
-                                        1 => "notification-before",
-                                        2 => "notification-compact",
-                                        3 => "notification-expanded",
-                                        4 => "notification-protected-media",
-                                        _ => "notification-settled",
-                                    }
-                                } else {
-                                    match stage {
-                                        1 => "idle",
-                                        2 => "expanded",
-                                        3 => "media",
-                                        4 => "volume",
-                                        _ => "settled",
-                                    }
-                                };
-                            match crate::verification::snapshot(&ui, name) {
-                                Ok(path) => record(&format!("snapshot {}", path.display())),
-                                Err(e) => record(&format!("snapshot FAILED {e}")),
-                            }
-                        }
-                    }
-                    if std::env::args().any(|arg| arg == "--verify-notifications") {
-                        verification_notification_step(&app, stage);
-                        return;
-                    }
-                    match stage {
-                        1 => transition(&app, IslandState::Expanded),
-                        2 => transition(&app, IslandState::Media),
-                        3 => transition(&app, IslandState::Volume),
-                        4..=23 => transition(
-                            &app,
-                            if stage % 2 == 0 {
-                                IslandState::Expanded
-                            } else {
-                                IslandState::Idle
-                            },
-                        ),
-                        24 => transition(&app, IslandState::Idle),
-                        _ => {
-                            record(&format!(
-                                "complete frames={} active={}",
-                                app.borrow().frames,
-                                app.borrow().timer.running()
-                            ));
-                            let _ = slint::quit_event_loop();
-                        }
-                    }
-                }
-            },
-        );
-    }
+    let _verification_timer = verification::setup(&app);
     slint::run_event_loop()?;
     if app.borrow().verification {
         record(&app.borrow().metrics.summary());
@@ -913,226 +795,78 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn record(message: &str) {
-    use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("verification.log")
-    {
-        let _ = writeln!(file, "{message}");
-    }
-}
-fn status(app: &Rc<RefCell<App>>, message: &str) {
-    if let Some(ui) = app.borrow().ui.upgrade() {
-        ui.set_service_status(message.into());
-    }
-}
-
-fn apply_media(ui: &IslandWindow, snapshot: &MediaSnapshot) {
-    ui.set_media_available(snapshot.available);
-    ui.set_playing(snapshot.playing);
-    ui.set_track_title(snapshot.title.as_str().into());
-    ui.set_artist_name(snapshot.artist.as_str().into());
-    ui.set_media_source(snapshot.source.as_str().into());
-    ui.set_can_play_pause(snapshot.can_play_pause);
-    ui.set_can_previous(snapshot.can_previous);
-    ui.set_can_next(snapshot.can_next);
-    ui.set_can_seek(snapshot.can_seek);
-    ui.set_position_seconds(snapshot.position_seconds as f32);
-    ui.set_duration_seconds(snapshot.duration_seconds as f32);
-    ui.set_progress(if snapshot.duration_seconds > 0. {
-        (snapshot.position_seconds / snapshot.duration_seconds).clamp(0., 1.) as f32
-    } else {
-        0.
-    });
-    ui.set_elapsed_label(time_label(snapshot.position_seconds).into());
-    ui.set_duration_label(time_label(snapshot.duration_seconds).into());
-    ui.set_service_status(snapshot.error.as_deref().unwrap_or("").into());
-    if let Some(bytes) = &snapshot.artwork {
-        match slint::Image::load_from_data(bytes, None) {
-            Ok(image) => {
-                ui.set_artwork(image);
-                ui.set_has_artwork(true);
-            }
-            Err(_) => ui.set_has_artwork(false),
-        }
-    } else {
-        ui.set_has_artwork(false);
-    }
-}
-fn time_label(seconds: f64) -> String {
-    let seconds = if seconds.is_finite() {
-        seconds.max(0.) as u64
-    } else {
-        0
-    };
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-fn sync_media_clock(app: &Rc<RefCell<App>>) {
-    let active = {
-        let a = app.borrow();
-        !a.hidden
-            && a.state == IslandState::Media
-            && a.ui
-                .upgrade()
-                .is_some_and(|ui| ui.get_media_available() && ui.get_playing())
-    };
-    if !active {
-        app.borrow().media_clock.stop();
-        return;
-    }
-    if app.borrow().media_clock.running() {
-        return;
-    }
-    let weak = Rc::downgrade(app);
-    app.borrow().media_clock.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(250),
-        move || {
-            if let Some(app) = weak.upgrade() {
-                let a = app.borrow();
-                if let Some(ui) = a.ui.upgrade() {
-                    let (position, duration, received) = a.media_position;
-                    let position =
-                        (position + received.elapsed().as_secs_f64()).min(duration.max(0.));
-                    ui.set_progress(if duration > 0. {
-                        (position / duration).clamp(0., 1.) as f32
-                    } else {
-                        0.
-                    });
-                    ui.set_elapsed_label(time_label(position).into());
-                }
-            }
-        },
-    );
-}
-fn configure_material(app: &Rc<RefCell<App>>) {
-    if app.borrow().hidden {
-        return;
-    }
-    app.borrow().render();
-    let old = app.borrow_mut().capture.take();
-    drop(old);
-    let _ = platform::exclude_from_capture(false);
-    let settings = app.borrow().settings.clone();
-    platform::set_animation_preference(settings.animations);
-    if let Err(e) = platform::set_appearance(settings.appearance, settings.opacity, settings.bounce)
-    {
-        status(app, &e);
-        if matches!(settings.appearance, Appearance::Acrylic) {
-            app.borrow_mut().settings.appearance = Appearance::Transparent;
-        }
-    }
-    if settings.appearance == Appearance::Glass {
-        if let Err(e) = platform::exclude_from_capture(true) {
-            status(app, &e);
-        } else {
-            platform::settle_exclusion();
-            refresh_eco_glass(app);
-        }
-    } else if settings.appearance == Appearance::LiveGlass {
-        let setup = (|| -> Result<platform::capture::CaptureService, String> {
-            platform::exclude_from_capture(true)?;
-            let bounds = platform::capture_bounds()?;
-            let a = app.borrow();
-            let ui = a.ui.clone();
-            let incoming = a.incoming_frame.clone();
-            let scheduled = a.frame_scheduled.clone();
-            drop(a);
-            scheduled.store(false, Ordering::Release);
-            platform::capture::CaptureService::start(
-                bounds,
-                platform::selected_monitor_handle(),
-                move |frame| {
-                    *incoming.lock().unwrap_or_else(|e| e.into_inner()) = Some(Backdrop {
-                        width: frame.width,
-                        height: frame.height,
-                        pixels: frame.pixels,
-                    });
-                    if !scheduled.swap(true, Ordering::AcqRel) {
-                        if ui
-                            .upgrade_in_event_loop(|ui| ui.invoke_backdrop_updated())
-                            .is_err()
-                        {
-                            scheduled.store(false, Ordering::Release);
-                        }
-                    }
-                },
-            )
-        })();
-        match setup {
-            Ok(capture) => app.borrow_mut().capture = Some(capture),
-            Err(e) => {
-                let _ = platform::exclude_from_capture(false);
-                app.borrow_mut().settings.appearance = Appearance::Acrylic;
-                let _ = platform::set_appearance(
-                    Appearance::Acrylic,
-                    settings.opacity,
-                    settings.bounce,
-                );
-                status(app, &format!("Glass unavailable; acrylic active: {e}"));
-            }
-        }
-    } else {
-        app.borrow().glass.borrow_mut().clear();
-    }
-    app.borrow().render();
-}
-
-fn refresh_eco_glass(app: &Rc<RefCell<App>>) {
-    if !app.borrow().attached
-        || app.borrow().hidden
-        || app.borrow().settings.appearance != Appearance::Glass
-    {
-        return;
-    }
-    match platform::capture_snapshot() {
-        Ok(frame) => {
-            let a = app.borrow();
-            let changed = a.glass.borrow_mut().set_backdrop(Backdrop {
-                width: frame.width,
-                height: frame.height,
-                pixels: frame.pixels,
-            });
-            if changed {
-                a.render();
-            }
-        }
-        Err(e) => status(app, &e),
-    }
-}
-
 fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
+    if state == IslandState::AppLauncher {
+        launcher::toggle(app);
+        return;
+    }
+    if app.borrow().launcher.open {
+        launcher::dismiss(app, true);
+        if state == IslandState::Idle {
+            return;
+        }
+    }
     {
         let mut a = app.borrow_mut();
         let now = a.now();
         match state {
-            IslandState::Idle => a.coordinator.close(now),
+            IslandState::Idle => {
+                a.coordinator.close(now);
+                // An explicit collapse consumes this hover visit. Require a
+                // fresh entry before automatically opening again.
+                a.hover_intent.leave();
+            }
             IslandState::Expanded => a.coordinator.open(Panel::Launcher, now),
             IslandState::Media => a.coordinator.open(Panel::Media, now),
             IslandState::Volume => a.coordinator.open(Panel::Volume, now),
             IslandState::Compact => a.coordinator.volume(now),
             IslandState::Notification => a.coordinator.expand_notification(now),
+            IslandState::Timer => a.coordinator.open(Panel::Timer, now),
+            IslandState::Battery => a.coordinator.open(Panel::Battery, now),
+            IslandState::Plugin => a.coordinator.open(Panel::Plugins, now),
+            IslandState::AppLauncher => unreachable!("handled before borrowing app"),
         }
     }
     sync_presentation(app);
 }
+
 fn user_toggle(app: &Rc<RefCell<App>>) {
+    if app.borrow().launcher.open {
+        launcher::dismiss(app, true);
+        return;
+    }
     {
         let mut a = app.borrow_mut();
         let now = a.now();
         if a.coordinator.panel_open() {
             a.coordinator.close(now);
+            a.hover_intent.leave();
         } else if matches!(a.coordinator.view(now).content, Content::Notification(..)) {
             a.coordinator.expand_notification(now);
         } else {
-            a.coordinator.open(Panel::Launcher, now);
+            if a.coordinator.selected_page().is_some() {
+                a.coordinator.open_hover(now);
+            } else {
+                a.coordinator.open(Panel::Launcher, now);
+            }
         }
     }
     sync_presentation(app);
 }
+
 fn apply_content_properties(ui: &IslandWindow, view: &Presentation, settings: &Settings) {
+    ui.set_app_launcher_mode(matches!(view.content, Content::AppLauncher));
+    plugins::apply_content_properties(ui, view);
+    ui.set_battery_mode(matches!(view.content, Content::BatteryPanel));
+    ui.set_compact_battery(matches!(view.content, Content::CompactBattery(_)));
+    if let Content::CompactBattery(activity) = &view.content {
+        apply_battery_properties(ui, activity.snapshot, activity.label());
+    }
+    ui.set_timer_mode(matches!(
+        view.content,
+        Content::Timer | Content::TimerFinished
+    ));
+    ui.set_compact_timer(matches!(view.content, Content::CompactTimer));
     ui.set_notification_compact(matches!(view.content, Content::Notification(..)));
     ui.set_notification_mode(matches!(view.content, Content::ExpandedNotification(..)));
     ui.set_compact_media(matches!(view.content, Content::CompactMedia));
@@ -1169,6 +903,7 @@ fn apply_content_properties(ui: &IslandWindow, view: &Presentation, settings: &S
         }
     }
 }
+
 fn sync_presentation(app: &Rc<RefCell<App>>) {
     let (changed, state, deadline, panel, ui, hidden) = {
         let mut a = app.borrow_mut();
@@ -1179,11 +914,18 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
             .as_ref()
             .is_none_or(|old| old.content != view.content);
         let state = view.state();
+        if let Some(ui) = a.ui.upgrade() {
+            plugins::sync_visibility(&ui, &view);
+        }
         let panel = a.coordinator.panel_open() && !a.settings_visible && !a.hidden;
         let ui = a.ui.upgrade();
         if let Some(ui) = &ui {
             ui.set_pending_count(view.pending as i32);
             ui.set_volume_feedback(view.volume_chip);
+            ui.set_pinned(a.coordinator.pinned());
+            if matches!(view.content, Content::BatteryPanel) {
+                apply_battery_properties(ui, a.battery, a.battery.label());
+            }
         }
         if changed {
             a.pending_presentation = Some(view.clone());
@@ -1198,9 +940,16 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
             a.hidden,
         )
     };
-    if app.borrow().attached {
-        if let Err(e) = platform::set_panel_open(panel) {
-            settings_status(app, &e);
+    if app.borrow().attached
+        && let Err(e) = platform::set_panel_open(panel)
+    {
+        settings_status(app, &e);
+    }
+    pages::sync_hint(app);
+    if changed && state == IslandState::Plugin {
+        let selected = app.borrow().settings.selected_page.clone();
+        if let (Some(crate::navigation::Page::Plugin { id, view }), Some(ui)) = (selected, &ui) {
+            ui.invoke_plugin_page_ensure(id.into(), view.into());
         }
     }
     if !hidden {
@@ -1232,450 +981,58 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
     if ui.is_some() {
         sync_media_clock(app);
     }
-}
-fn access_label(access: &AccessStatus) -> String {
-    match access{AccessStatus::UnavailablePortable=>"Portable build: install the MSIX package to enable Windows notifications.".into(),AccessStatus::NotRequested=>"Access has not been granted. Choose Enable access to request it.".into(),AccessStatus::Denied=>"Windows denied access. Allow notification access in Windows Settings, then choose Retry.".into(),AccessStatus::Allowed=>"Windows notification access is allowed. Previews never clear Notification Center.".into(),AccessStatus::Error(e)=>format!("Notification access unavailable: {e}")}
-}
-fn settings_status(app: &Rc<RefCell<App>>, message: &str) {
-    if let Some(ui) = app.borrow().preferences.upgrade() {
-        ui.set_status_text(message.into());
-    }
-}
-fn refresh_preferences(app: &Rc<RefCell<App>>) {
-    let (ui, s, apps, access) = {
-        let mut a = app.borrow_mut();
-        if a.settings_sync {
-            return;
-        }
-        a.settings_sync = true;
-        (
-            a.preferences.upgrade(),
-            a.settings.clone(),
-            a.observed_apps.clone(),
-            a.notification_access.clone(),
-        )
-    };
-    if let Some(ui) = ui {
-        crate::preferences::populate(
-            &ui,
-            &s,
-            &platform::monitors(),
-            &apps,
-            &access_label(&access),
-        );
-        ui.set_notification_access_requestable(!matches!(
-            access,
-            AccessStatus::UnavailablePortable
-        ));
-    }
-    app.borrow_mut().settings_sync = false;
-}
-fn apply_settings(app: &Rc<RefCell<App>>, settings: Settings, persist: bool) {
-    let (old, attached, service) = {
-        let mut a = app.borrow_mut();
-        let old = a.settings.clone();
-        a.settings = settings.clone();
-        let now = a.now();
-        a.coordinator.set_dwell(settings.notification_duration, now);
-        a.coordinator.retain_apps(&settings.blocked_apps, now);
-        if !settings.notifications_enabled || settings.notifications_paused {
-            a.coordinator.clear_notifications(now);
-        }
-        let media = settings.compact_now_playing
-            && a.ui
-                .upgrade()
-                .is_some_and(|ui| ui.get_media_available() && ui.get_playing());
-        a.coordinator.set_media(media, now);
-        (old, a.attached, a.notifications.clone())
-    };
-    if let Some(service) = service {
-        service.set_enabled(settings.notifications_enabled && !settings.notifications_paused);
-    }
-    if attached {
-        if let Err(e) = platform::configure_desktop(
-            &settings.monitor_id,
-            settings.fullscreen_hide,
-            settings.outside_click,
-            settings.shortcut_enabled,
-        ) {
-            settings_status(app, &e);
-            if e.contains("Ctrl+Alt+Space") {
-                app.borrow_mut().settings.shortcut_enabled = false;
-                let _ = platform::configure_desktop(
-                    &settings.monitor_id,
-                    settings.fullscreen_hide,
-                    settings.outside_click,
-                    false,
-                );
-            }
-        }
-        platform::set_animation_preference(app.borrow().animations_enabled());
-        if old.appearance != settings.appearance
-            || old.offset != settings.offset
-            || old.monitor_id != settings.monitor_id
-        {
-            configure_material(app);
-        } else {
-            let _ =
-                platform::set_appearance(settings.appearance, settings.opacity, settings.bounce);
-        }
-    }
-    {
-        let mut a = app.borrow_mut();
-        if !a.animations_enabled() {
-            let state = a.state;
-            a.target(state);
-            a.timer.stop();
-        }
-        a.render();
-    }
-    if old.privacy != settings.privacy {
-        let a = app.borrow();
-        if let (Some(ui), Some(view)) = (a.ui.upgrade(), a.rendered_presentation.as_ref()) {
-            apply_content_properties(&ui, view, &a.settings);
-        }
-    }
-    if persist {
-        if let Err(e) = app.borrow().settings.save() {
-            settings_status(app, &format!("Preferences could not be saved: {e}"));
-        }
-    }
-    sync_presentation(app);
-    refresh_preferences(app);
-}
-fn show_preferences(app: &Rc<RefCell<App>>) {
-    refresh_preferences(app);
-    let ui = app.borrow().preferences.upgrade();
-    if let Some(ui) = ui {
-        {
-            let mut a = app.borrow_mut();
-            a.settings_visible = true;
-            let now = a.now();
-            a.coordinator.suppress(true, now);
-        }
-        sync_presentation(app);
-        if let Err(e) = ui.show() {
-            settings_status(app, &e.to_string());
-            return;
-        }
-        let weak = ui.as_weak();
-        let _ = slint::spawn_local(async move {
-            if let Some(ui) = weak.upgrade() {
-                use slint::winit_030::{
-                    WinitWindowAccessor,
-                    winit::{platform::windows::WindowExtWindows, window::WindowLevel},
-                };
-                if let Ok(window) = ui.window().winit_window().await {
-                    window.set_skip_taskbar(false);
-                    window.set_window_level(WindowLevel::Normal);
-                    window.focus_window();
-                }
-            }
-        });
-    }
-}
-fn close_preferences(app: &Rc<RefCell<App>>, hide: bool) {
-    let ui = app.borrow().preferences.upgrade();
-    if hide {
-        if let Some(ui) = ui {
-            let _ = ui.hide();
-        }
-    }
-    {
-        let mut a = app.borrow_mut();
-        a.settings_visible = false;
-        let now = a.now();
-        let hidden = a.hidden;
-        a.coordinator.suppress(hidden, now);
-    }
-    sync_presentation(app);
-}
-fn wire_new_features(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWindow) {
-    {
-        let app = app.clone();
-        ui.on_volume_updated(move |external| {
-            if external && app.borrow().settings.auto_volume {
-                let mut a = app.borrow_mut();
-                let now = a.now();
-                a.coordinator.volume(now);
-            }
-            sync_presentation(&app);
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_pointer_interaction(move |pressed| {
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            let pause = pressed || a.hover;
-            a.coordinator.set_hover(pause, now);
-            drop(a);
-            sync_presentation(&app);
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_expand_notification(move || {
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            a.coordinator.expand_notification(now);
-            drop(a);
-            sync_presentation(&app);
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_hide_notification(move || {
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            a.coordinator.hide_notification(now);
-            drop(a);
-            sync_presentation(&app);
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_open_source(move || {
-            let record =
-                app.borrow()
-                    .presentation
-                    .as_ref()
-                    .and_then(|view| match &view.content {
-                        Content::Notification(record, _)
-                        | Content::ExpandedNotification(record) => Some(record.clone()),
-                        _ => None,
-                    });
-            if let Some(record) = record {
-                if let Err(e) = notifications::open_source_app(&record.app_id) {
-                    status(&app, &e);
-                } else {
-                    transition(&app, IslandState::Idle);
-                }
-            }
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_settings_requested(move || show_preferences(&app));
-    }
-    {
-        let app = app.clone();
-        ui.on_escape(move || transition(&app, IslandState::Idle));
-    }
-    {
-        let app = app.clone();
-        prefs.on_changed(move || {
-            if app.borrow().settings_sync {
-                return;
-            }
-            let ui = app.borrow().preferences.upgrade();
-            if let Some(ui) = ui {
-                let settings =
-                    crate::preferences::read(&ui, &app.borrow().settings, &platform::monitors());
-                apply_settings(&app, settings, true);
-            }
-        });
-    }
-    {
-        let app = app.clone();
-        prefs.on_reset_defaults(move || apply_settings(&app, Settings::default(), true));
-    }
-    {
-        let app = app.clone();
-        prefs.on_app_filter_changed(move |id, enabled| {
-            let mut s = app.borrow().settings.clone();
-            s.blocked_apps.retain(|old| old != id.as_str());
-            if !enabled {
-                s.blocked_apps.push(id.to_string());
-            }
-            apply_settings(&app, s, true);
-        });
-    }
-    {
-        let app = app.clone();
-        prefs.on_close_settings(move || close_preferences(&app, true));
-    }
-    {
-        let app = app.clone();
-        prefs.window().on_close_requested(move || {
-            close_preferences(&app, false);
-            slint::CloseRequestResponse::HideWindow
-        });
-    }
-    {
-        let app = app.clone();
-        prefs.on_preview_motion(move || {
-            transition(&app, IslandState::Expanded);
-            let weak = Rc::downgrade(&app);
-            slint::Timer::single_shot(Duration::from_millis(900), move || {
-                if let Some(app) = weak.upgrade() {
-                    transition(&app, IslandState::Idle);
-                }
-            });
-        });
-    }
-    {
-        let app = app.clone();
-        prefs.on_retry_notifications(move || {
-            if let Some(service) = app.borrow().notifications.clone() {
-                service.refresh_access();
-            }
-            refresh_preferences(&app);
-        });
-    }
-    {
-        let app = app.clone();
-        prefs.on_enable_notifications(move || {
-            let app = app.clone();
-            let _ = slint::spawn_local(async move {
-                match NotificationService::request_access().await {
-                    Ok(access) => {
-                        app.borrow_mut().notification_access = access.clone();
-                        if access == AccessStatus::Allowed {
-                            let mut s = app.borrow().settings.clone();
-                            s.notifications_enabled = true;
-                            apply_settings(&app, s, true);
-                        }
-                        if let Some(service) = app.borrow().notifications.clone() {
-                            service.refresh_access();
-                        }
-                        refresh_preferences(&app);
-                    }
-                    Err(e) => settings_status(&app, &e),
-                }
-            });
-        });
-    }
-    {
-        let app = app.clone();
-        ui.on_notifications_updated(move || {
-            let events = {
-                let a = app.borrow();
-                let mut queue = a
-                    .notification_inbox
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                a.notification_scheduled.store(false, Ordering::Release);
-                queue.drain(..).collect::<Vec<_>>()
-            };
-            for event in events {
-                let mut a = app.borrow_mut();
-                let now = a.now();
-                match event {
-                    NotificationEvent::Access(access) => {
-                        a.notification_access = access.clone();
-                        if access != AccessStatus::Allowed {
-                            a.coordinator.clear_notifications(now);
-                        }
-                    }
-                    NotificationEvent::Removed(id) => a.coordinator.remove(id, now),
-                    NotificationEvent::Added(record) | NotificationEvent::Updated(record) => {
-                        if !a.observed_apps.iter().any(|(id, _)| id == &record.app_id) {
-                            a.observed_apps
-                                .push((record.app_id.clone(), record.app_name.clone()));
-                        }
-                        if a.settings.notifications_enabled
-                            && !a.settings.notifications_paused
-                            && !a.settings.blocked_apps.contains(&record.app_id)
-                            && platform::notification_allowed()
-                        {
-                            a.coordinator.push(record, now);
-                        }
-                    }
-                }
-            }
-            sync_presentation(&app);
-            refresh_preferences(&app);
-        });
-    }
-    let (incoming, scheduled) = {
-        let a = app.borrow();
-        (
-            a.notification_inbox.clone(),
-            a.notification_scheduled.clone(),
-        )
-    };
-    let weak = ui.as_weak();
-    match NotificationService::new(move |event| {
-        let mut queue = incoming.lock().unwrap_or_else(|e| e.into_inner());
-        if queue.len() >= 128 {
-            queue.pop_front();
-        }
-        queue.push_back(event);
-        drop(queue);
-        if !scheduled.swap(true, Ordering::AcqRel) {
-            if weak
-                .upgrade_in_event_loop(|ui| ui.invoke_notifications_updated())
-                .is_err()
-            {
-                scheduled.store(false, Ordering::Release);
-            }
-        }
-    }) {
-        Ok(service) => {
-            let mut a = app.borrow_mut();
-            a.notification_access = service.access_status();
-            service
-                .set_enabled(a.settings.notifications_enabled && !a.settings.notifications_paused);
-            a.notifications = Some(Rc::new(service));
-        }
-        Err(e) => app.borrow_mut().notification_access = AccessStatus::Error(e),
-    }
-    refresh_preferences(app);
+    lyrics::sync(app, false);
 }
 
-fn verification_notification_step(app: &Rc<RefCell<App>>, stage: u32) {
-    let fixture = |id| NotificationRecord {
-        id,
-        app_id: "StillIsland.SilentFixture".into(),
-        app_name: "Integration fixture".into(),
-        title: format!("Notification {id}"),
-        body: "A synthetic preview. Hiding this never removes a Windows notification.".into(),
-        created_ticks: 0,
-        icon: None,
-    };
-    match stage {
-        1 => {
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            a.coordinator.push(fixture(1), now);
-        }
-        2 => {
-            let ui = app.borrow().ui.upgrade();
-            if let Some(ui) = ui {
-                ui.invoke_expand_notification();
-            }
-        }
-        3 => {
-            transition(app, IslandState::Media);
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            for id in 2..32 {
-                a.coordinator.push(fixture(id), now);
-            }
-            record("notification fixture queued while user Media panel remains pinned");
-        }
-        4 => {
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            a.coordinator.close(now);
-            a.coordinator.volume(now);
-        }
-        24 => {
-            let mut a = app.borrow_mut();
-            let now = a.now();
-            a.coordinator.clear_notifications(now);
-            a.coordinator.close(now);
-        }
-        25 => {
-            record(&format!(
-                "complete frames={} active={}",
-                app.borrow().frames,
-                app.borrow().timer.running()
-            ));
-            let _ = slint::quit_event_loop();
-        }
-        _ => {}
+fn status(app: &Rc<RefCell<App>>, message: &str) {
+    if let Some(ui) = app.borrow().ui.upgrade() {
+        ui.set_service_status(message.into());
     }
+}
+
+fn apply_battery_properties(
+    ui: &IslandWindow,
+    snapshot: crate::services::battery::BatterySnapshot,
+    label: &str,
+) {
+    ui.set_battery_present(snapshot.present);
+    ui.set_battery_percent_label(
+        snapshot
+            .percent
+            .map(|p| format!("{p}%"))
+            .unwrap_or_else(|| "Unavailable".into())
+            .into(),
+    );
+    ui.set_battery_level(snapshot.percent.map_or(0., |p| p as f32 / 100.));
+    ui.set_battery_power_label(label.into());
+}
+
+fn update_battery(app: &Rc<RefCell<App>>, snapshot: crate::services::battery::BatterySnapshot) {
+    let mut a = app.borrow_mut();
+    let activity = a.battery_detector.update(snapshot);
+    a.battery = snapshot;
+    if let Some(ui) = a.ui.upgrade() {
+        apply_battery_properties(&ui, snapshot, snapshot.label());
+    }
+    let now = a.now();
+    if a.settings.battery_previews
+        && !a.verification
+        && let Some(activity) = activity
+    {
+        a.coordinator.battery(activity, now);
+    }
+    if !snapshot.present {
+        a.coordinator.clear_battery(now);
+    }
+    drop(a);
     sync_presentation(app);
+}
+
+fn time_label(seconds: f64) -> String {
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.) as u64
+    } else {
+        0
+    };
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }

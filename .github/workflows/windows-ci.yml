@@ -41,10 +41,10 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Type check
-        run: cargo check --locked
+        run: cargo check --workspace --locked
       - name: Clippy
-        run: cargo clippy --locked --all-targets
+        run: cargo clippy --workspace --locked --all-targets
       - name: Unit tests
-        run: cargo test --locked
+        run: cargo test --workspace --locked
       - name: Release tooling tests
         run: ./scripts/test-release.ps1

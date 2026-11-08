@@ -1,0 +1,9 @@
+[package]
+name = "still-island-plugin-codex-usage"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[dependencies]
+still-island-plugin-sdk = { path = "../../crates/plugin-sdk" }

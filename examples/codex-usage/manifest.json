@@ -1,0 +1,18 @@
+{
+  "id": "org.stillisland.codex-usage",
+  "name": "Codex Usage",
+  "version": "0.2.0",
+  "api_version": 1,
+  "entrypoint": "still-island-plugin-codex-usage.exe",
+  "background": false,
+  "capabilities": ["native_ui", "activities", "local_process:codex", "network:chatgpt.com", "network:api.openai.com"],
+  "actions": [
+    {"id": "refresh", "label": "Refresh usage"},
+    {"id": "show", "label": "Show usage in notch"}
+  ],
+  "views": [{"id": "main", "label": "Usage"}],
+  "config": [
+    {"id": "executable", "label": "Codex executable path (blank = automatic)", "kind": "string", "default": ""}
+  ],
+  "assets": []
+}

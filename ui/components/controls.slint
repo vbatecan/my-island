@@ -1,0 +1,106 @@
+// Shared island controls. Animation and application state remain in the host.
+export component TextButton inherits Rectangle {
+    in property <float> ui-scale: 1;
+    in property <float> text-scale: 1;
+    private property <length> scaled-pixel: 1px * root.ui-scale;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    callback interaction(bool);
+    border-radius: (5 * root.scaled-pixel);
+    background: !root.enabled ? #ffffff0a : button.pressed ? #ffffff36 : button.has-hover ? #ffffff28 : #ffffff12;
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    opacity: root.enabled ? 1 : 0.35;
+    Text { text: root.label; color: white; font-size: (11 * root.scaled-pixel * root.text-scale); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+    button := TouchArea { enabled: root.enabled; mouse-cursor: pointer; changed pressed => { root.interaction(self.pressed); } clicked => { root.clicked(); } }
+}
+
+export component Glyph inherits Text {
+    in property <float> ui-scale: 1;
+    private property <length> scaled-pixel: 1px * root.ui-scale;
+    font-family: "Segoe Fluent Icons";
+    font-size: (18 * root.scaled-pixel);
+    color: white;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+export component QuietButton inherits Rectangle {
+    in property <float> ui-scale: 1;
+    private property <length> scaled-pixel: 1px * root.ui-scale;
+    in property <string> glyph;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked();
+    callback interaction(bool);
+    width: (32 * root.scaled-pixel);
+    height: (28 * root.scaled-pixel);
+    border-radius: self.height / 2;
+    background: !root.enabled ? transparent : pointer.pressed ? #ffffff30 : pointer.has-hover ? #ffffff20 : root.active ? #ffffff24 : transparent;
+    opacity: root.enabled ? 1 : 0.3;
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    Glyph { ui-scale: root.ui-scale; text: root.glyph; font-size: (15 * root.scaled-pixel); }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        changed pressed => { root.interaction(self.pressed); }
+        clicked => { root.clicked(); }
+    }
+}
+
+// Finite playback-state crossfade; no clock or animation remains active at rest.
+export component PlaybackButton inherits QuietButton {
+    in property <bool> playing: false;
+    in property <bool> motion-enabled: true;
+    in property <float> motion-speed: 1;
+    private property <bool> step-animated: false;
+    private property <float> glyph-mix: 0;
+    glyph: "";
+    init => { self.step-animated = false; self.glyph-mix = self.playing ? 1 : 0; self.step-animated = true; }
+    changed playing => { self.glyph-mix = self.playing ? 1 : 0; }
+    changed motion-enabled => { if !self.motion-enabled { self.step-animated = false; self.glyph-mix = self.playing ? 1 : 0; } else { self.step-animated = true; } }
+    animate glyph-mix { duration: root.motion-enabled && root.step-animated ? 150ms / min(2, max(0.5, root.motion-speed)) : 0ms; easing: ease-out; }
+    Glyph { ui-scale: root.ui-scale; text: "\u{e768}"; opacity: 1 - root.glyph-mix; }
+    Glyph { ui-scale: root.ui-scale; text: "\u{e769}"; opacity: root.glyph-mix; }
+}
+
+// Keep the normalized fill, corner treatment, and optional seek thumb identical
+// across media, volume, and countdown displays. The host owns all input handling.
+export component ProgressTrack inherits Rectangle {
+    in property <float> ui-scale: 1;
+    private property <length> scaled-pixel: 1px * root.ui-scale;
+    in property <float> value: 0;
+    in property <color> track-color: #ffffff28;
+    in property <color> fill-color: #e4e4ea;
+    in property <bool> show-thumb: false;
+    in property <length> thumb-size: (9 * root.scaled-pixel);
+    in property <color> thumb-color: root.fill-color;
+    private property <float> normalized: min(1, max(0, root.value));
+    height: (3 * root.scaled-pixel);
+    border-radius: self.height / 2;
+    background: root.track-color;
+    Rectangle { x: 0px; y: 0px; width: parent.width * root.normalized; height: parent.height; border-radius: parent.border-radius; background: root.fill-color; }
+    if root.show-thumb : Rectangle {
+        x: min(max(0px, parent.width - self.width), max(0px, parent.width * root.normalized - self.width / 2));
+        y: (parent.height - self.height) / 2;
+        width: root.thumb-size; height: root.thumb-size;
+        border-radius: self.height / 2;
+        background: root.thumb-color;
+    }
+}
+
+export component Artwork inherits Rectangle {
+    in property <float> ui-scale: 1;
+    private property <length> scaled-pixel: 1px * root.ui-scale;
+    in property <image> artwork;
+    in property <bool> has-artwork: false;
+    in property <string> placeholder-glyph: "\u{e8d6}";
+    border-radius: min((6 * root.scaled-pixel), self.width / 4);
+    background: #ffffff16;
+    clip: true;
+    if root.has-artwork : Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: root.artwork; image-fit: cover; }
+    if !root.has-artwork : Glyph { ui-scale: root.ui-scale; x: 0px; y: 0px; width: parent.width; height: parent.height; text: root.placeholder-glyph; font-size: (22 * root.scaled-pixel); color: #b4b4bc; }
+}

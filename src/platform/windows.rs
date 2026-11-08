@@ -1,12 +1,19 @@
 use crate::{
-    settings::{Appearance, Bounce},
-    state::IslandState,
+    settings::Appearance,
+    shape::{FormFactor, ShapeContour},
+    state::{IslandState, OVERLAY_WIDTH},
 };
 use ::windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::{RemoteDesktop::*, Threading::CreateMutexW},
+        System::{
+            RemoteDesktop::*,
+            Threading::{
+                CreateMutexW, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            },
+        },
         UI::{
             Accessibility::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*,
             WindowsAndMessaging::*,
@@ -22,25 +29,22 @@ const BACKDROP_REFRESH: u32 = WM_APP + 33;
 const DESKTOP_POLICY: u32 = WM_APP + 34;
 const CLOSE_PANEL: u32 = WM_APP + 35;
 const HOTKEY: i32 = 0x5354;
+const LAUNCHER_HOTKEY: i32 = 0x5360;
 const SUBCLASS: usize = 0x4f524249;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
     Show,
+    Battery(crate::services::battery::BatterySnapshot),
     Reset,
     Exit,
     State(IslandState),
-    ToggleAnimations,
-    ToggleTopmost,
-    Offset(f64),
-    Appearance(Appearance),
-    Opacity(f32),
-    Bounce(Bounce),
     DisplayChanged,
     BackdropRefresh,
     OpenSettings,
     ClosePanel,
     HotkeyToggle,
+    LauncherToggle,
     DesktopPolicyChanged(bool),
 }
 
@@ -51,27 +55,34 @@ struct Shape {
     radius: f64,
     offset: f64,
     topmost: bool,
+    form: FormFactor,
+    ui_scale: f64,
+    canvas_width: f64,
+    canvas_height: f64,
 }
 impl Default for Shape {
     fn default() -> Self {
+        let geometry = IslandState::Idle.geometry();
         Self {
-            width: 126.,
-            height: 32.,
-            radius: 16.,
+            width: geometry.width,
+            height: geometry.height,
+            radius: geometry.radius,
             offset: 6.,
             topmost: true,
+            form: FormFactor::Notch,
+            ui_scale: 1.,
+            canvas_width: crate::state::OVERLAY_WIDTH,
+            canvas_height: crate::state::OVERLAY_HEIGHT,
         }
     }
 }
 #[derive(Default)]
 struct Native {
     hwnd: HWND,
+    power: Option<super::power::PowerNotifications>,
     icon: HICON,
     shape: Shape,
-    animations: bool,
     appearance: Appearance,
-    opacity: f32,
-    bounce: Bounce,
     handler: Option<Rc<dyn Fn(Event)>>,
     taskbar_created: u32,
     hooks: Vec<HWINEVENTHOOK>,
@@ -80,8 +91,13 @@ struct Native {
     policy_pending: bool,
     monitor_id: String,
     fullscreen_hide: bool,
+    fullscreen_always_hide: Vec<String>,
+    fullscreen_always_show: Vec<String>,
     outside_click_collapse: bool,
     shortcut_enabled: bool,
+    launcher_shortcut: Option<u32>,
+    keyboard_mode: bool,
+    previous_foreground: HWND,
     panel_open: bool,
     mouse_hook: HHOOK,
     keyboard_hook: HHOOK,
@@ -141,13 +157,17 @@ pub fn attach(hwnd: isize) -> Result<(), String> {
             let mut n = n.borrow_mut();
             n.hwnd = hwnd;
             n.icon = icon;
-            n.animations = true;
             n.taskbar_created = taskbar_created;
         });
         let hooks = [
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_MOVESIZEEND,
             EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_HIDE,
+            EVENT_OBJECT_DESTROY,
+            EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MINIMIZEEND,
         ]
         .into_iter()
         .map(|event| {
@@ -164,6 +184,7 @@ pub fn attach(hwnd: isize) -> Result<(), String> {
         .filter(|hook| !hook.is_invalid())
         .collect();
         NATIVE.with(|n| n.borrow_mut().hooks = hooks);
+        NATIVE.with(|n| n.borrow_mut().power = super::power::PowerNotifications::attach(hwnd).ok());
         add_tray()?;
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION).map_err(|e| e.to_string())?;
         position();
@@ -171,7 +192,26 @@ pub fn attach(hwnd: isize) -> Result<(), String> {
     Ok(())
 }
 
-pub fn update_shape(width: f64, height: f64, radius: f64, offset: f64, topmost: bool) {
+#[allow(clippy::too_many_arguments)] // A narrow bridge from the resolved UI contour and canvas.
+pub fn update_shape(
+    width: f64,
+    height: f64,
+    radius: f64,
+    offset: f64,
+    topmost: bool,
+    form: FormFactor,
+    ui_scale: f64,
+    canvas_width: f64,
+    canvas_height: f64,
+) {
+    let ui_scale = super::display::user_scale(ui_scale);
+    let canvas_width = super::display::canvas_extent(canvas_width, crate::state::OVERLAY_WIDTH);
+    let canvas_height = super::display::canvas_extent(canvas_height, crate::state::OVERLAY_HEIGHT);
+    let offset = if form == FormFactor::Notch {
+        0.
+    } else {
+        offset
+    };
     let previous = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
         let old = n.shape;
@@ -181,18 +221,24 @@ pub fn update_shape(width: f64, height: f64, radius: f64, offset: f64, topmost: 
             radius,
             offset,
             topmost,
+            form,
+            ui_scale,
+            canvas_width,
+            canvas_height,
         };
         old
     });
-    if previous.offset != offset || previous.topmost != topmost {
+    if previous.offset != offset
+        || previous.topmost != topmost
+        || previous.form != form
+        || previous.ui_scale != ui_scale
+        || previous.canvas_width != canvas_width
+        || previous.canvas_height != canvas_height
+    {
         position();
     } else if previous.width != width || previous.height != height || previous.radius != radius {
         region();
     }
-}
-
-pub fn set_animation_preference(enabled: bool) {
-    NATIVE.with(|n| n.borrow_mut().animations = enabled);
 }
 
 /// Apply desktop preferences without timers or changing any Windows preferences.
@@ -244,8 +290,98 @@ pub fn selected_monitor_handle() -> isize {
         .unwrap_or(0)
 }
 
+/// Selected monitor width in logical pixels. Called when targets/display
+/// configuration change, never by an idle timer or rendering loop.
+pub fn available_width() -> f64 {
+    let id = NATIVE.with(|n| n.borrow().monitor_id.clone());
+    super::display::available_width(&id).unwrap_or(OVERLAY_WIDTH)
+}
+
 pub fn set_panel_open(open: bool) -> Result<(), String> {
     NATIVE.with(|n| n.borrow_mut().panel_open = open);
+    refresh_input_hooks()
+}
+
+/// Register a replacement before releasing the old chord, preserving a working
+/// registration if another program owns the requested shortcut.
+pub fn configure_launcher_shortcut(enabled: bool, chord: u32) -> Result<(), String> {
+    let desired = enabled.then_some(chord.min(2));
+    let (hwnd, previous) = NATIVE.with(|n| {
+        let n = n.borrow();
+        (n.hwnd, n.launcher_shortcut)
+    });
+    if desired == previous {
+        return Ok(());
+    }
+    // SAFETY: registrations belong to this thread's live overlay HWND. IDs are
+    // disjoint from the ordinary island hotkey and paired with unregistration.
+    unsafe {
+        if let Some(index) = desired {
+            let modifiers = match index {
+                1 => MOD_CONTROL,
+                2 => MOD_ALT | MOD_SHIFT,
+                _ => MOD_ALT,
+            };
+            RegisterHotKey(
+                Some(hwnd),
+                LAUNCHER_HOTKEY + index as i32,
+                modifiers | MOD_NOREPEAT,
+                VK_SPACE.0 as u32,
+            )
+            .map_err(|e| {
+                format!("Launcher shortcut unavailable (choose another in Settings): {e}")
+            })?;
+        }
+        if let Some(index) = previous {
+            let _ = UnregisterHotKey(Some(hwnd), LAUNCHER_HOTKEY + index as i32);
+        }
+    }
+    NATIVE.with(|n| n.borrow_mut().launcher_shortcut = desired);
+    Ok(())
+}
+
+/// Only an explicit launcher invocation may activate the overlay. Ordinary
+/// island mode always regains WS_EX_NOACTIVATE. Never attach input threads or
+/// synthesize keys to bypass Windows foreground restrictions.
+pub fn set_keyboard_mode(active: bool, restore_focus: bool) -> Result<(), String> {
+    let (hwnd, previous) = NATIVE.with(|n| {
+        let mut n = n.borrow_mut();
+        if active && !n.keyboard_mode {
+            n.previous_foreground = unsafe { GetForegroundWindow() };
+        }
+        n.keyboard_mode = active;
+        (n.hwnd, n.previous_foreground)
+    });
+    // SAFETY: UI-thread HWND; changing styles does not transfer ownership. The
+    // saved HWND is validated and only restored while our window owns focus.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            if active {
+                style & !WS_EX_NOACTIVATE.0
+            } else {
+                style | WS_EX_NOACTIVATE.0
+            } as isize,
+        );
+        if active {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            if !SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() != hwnd {
+                NATIVE.with(|n| n.borrow_mut().keyboard_mode = false);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style | WS_EX_NOACTIVATE.0) as isize);
+                return Err("Windows did not grant launcher keyboard focus. Try the launcher shortcut again.".into());
+            }
+            let _ = SetFocus(Some(hwnd));
+        } else if restore_focus
+            && foreground == hwnd
+            && previous != hwnd
+            && IsWindow(Some(previous)).as_bool()
+        {
+            let _ = SetForegroundWindow(previous);
+        }
+    }
     refresh_input_hooks()
 }
 
@@ -253,8 +389,8 @@ fn refresh_input_hooks() -> Result<(), String> {
     let (mouse_needed, keyboard_needed, mouse, keyboard) = NATIVE.with(|n| {
         let n = n.borrow();
         (
-            n.panel_open && n.outside_click_collapse && !n.hidden,
-            n.panel_open && !n.hidden,
+            n.panel_open && (n.outside_click_collapse || n.keyboard_mode) && !n.hidden,
+            n.panel_open && !n.keyboard_mode && !n.hidden,
             n.mouse_hook,
             n.keyboard_hook,
         )
@@ -346,7 +482,7 @@ pub fn notification_allowed() -> bool {
 fn queue_policy() {
     let hwnd = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
-        if n.policy_pending {
+        if n.policy_pending || n.hwnd.is_invalid() {
             return None;
         }
         n.policy_pending = true;
@@ -360,51 +496,294 @@ fn queue_policy() {
 }
 
 fn refresh_desktop_policy() {
-    let (hwnd, id, fullscreen_hide, locked, was_hidden) = NATIVE.with(|n| {
-        let mut n = n.borrow_mut();
-        n.policy_pending = false;
-        (
-            n.hwnd,
-            n.monitor_id.clone(),
-            n.fullscreen_hide,
-            n.locked,
-            n.hidden,
+    let (hwnd, id, fullscreen_hide, locked, was_hidden, always_hide, always_show) =
+        NATIVE.with(|n| {
+            let mut n = n.borrow_mut();
+            n.policy_pending = false;
+            (
+                n.hwnd,
+                n.monitor_id.clone(),
+                n.fullscreen_hide,
+                n.locked,
+                n.hidden,
+                n.fullscreen_always_hide.clone(),
+                n.fullscreen_always_show.clone(),
+            )
+        });
+    // Query actual foreground/owner and monitor surfaces, not the last window
+    // event's source. A background fullscreen surface on another monitor still
+    // needs protection when keyboard focus moves away from that monitor.
+    let covered = super::display::selected(&id).is_some_and(|(monitor, info)| unsafe {
+        monitor_has_fullscreen(
+            hwnd,
+            monitor,
+            info.rcMonitor,
+            fullscreen_hide,
+            &always_hide,
+            &always_show,
         )
     });
-    let covered = unsafe {
-        let foreground = GetForegroundWindow();
-        let mut rect = RECT::default();
-        let mut class = [0u16; 128];
-        let class_len = GetClassNameW(foreground, &mut class).max(0) as usize;
-        let class = String::from_utf16_lossy(&class[..class_len]);
-        let shell = matches!(
-            class.as_str(),
-            "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
-        );
-        let geometric = foreground != hwnd
-            && !shell
-            && !foreground.is_invalid()
-            && !IsIconic(foreground).as_bool()
-            && GetWindowRect(foreground, &mut rect).is_ok()
-            && super::display::selected(&id).is_some_and(|(_, m)| {
-                rect.left <= m.rcMonitor.left
-                    && rect.top <= m.rcMonitor.top
-                    && rect.right >= m.rcMonitor.right
-                    && rect.bottom >= m.rcMonitor.bottom
-            });
-        let presentation = SHQueryUserNotificationState().is_ok_and(|state| {
-            state == QUNS_PRESENTATION_MODE || state == QUNS_RUNNING_D3D_FULL_SCREEN
-        });
-        geometric || presentation
-    };
-    let hidden = locked || (fullscreen_hide && covered);
+    let hidden = locked || covered;
     if hidden != was_hidden {
         NATIVE.with(|n| n.borrow_mut().hidden = hidden);
         unsafe {
             let _ = ShowWindow(hwnd, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
         }
         let _ = refresh_input_hooks();
-        emit(Event::DesktopPolicyChanged(hidden));
+    }
+    // Even unchanged policy may accompany an external window moving beneath a
+    // stationary pointer. The GUI can reconcile its pointer without polling.
+    emit(Event::DesktopPolicyChanged(hidden));
+}
+
+/// Explicit per-executable compatibility overrides. Session lock always wins.
+pub fn set_fullscreen_overrides(
+    always_hide: &[String],
+    always_show: &[String],
+) -> Result<(), String> {
+    let normalize = |values: &[String]| -> Result<Vec<String>, String> {
+        if values.len() > 64 {
+            return Err("At most 64 application names are supported per fullscreen list.".into());
+        }
+        let mut result = Vec::new();
+        for value in values {
+            let name = normalize_fullscreen_executable(value).ok_or(
+                "Use executable names such as game.exe, without a directory or arguments.",
+            )?;
+            if !result.contains(&name) {
+                result.push(name);
+            }
+        }
+        Ok(result)
+    };
+    let hide = normalize(always_hide)?;
+    let show = normalize(always_show)?;
+    NATIVE.with(|native| {
+        let mut native = native.borrow_mut();
+        native.fullscreen_always_hide = hide;
+        native.fullscreen_always_show = show;
+    });
+    queue_policy();
+    Ok(())
+}
+
+pub fn normalize_fullscreen_executable(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 260
+        || value
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+    {
+        return None;
+    }
+    let mut value = value.to_lowercase();
+    if std::path::Path::new(&value).extension().is_none() {
+        value.push_str(".exe");
+    }
+    Some(value)
+}
+
+fn app_override(name: Option<&str>, hide: &[String], show: &[String]) -> Option<bool> {
+    let name = name?;
+    if hide.iter().any(|entry| entry == name) {
+        Some(true)
+    } else if show.iter().any(|entry| entry == name) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn executable_name(window: HWND) -> Option<String> {
+    // SAFETY: read-only, limited-information process handle; all buffers are live.
+    // Close the handle before converting the owned UTF-16 result to a basename.
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut path = [0_u16; 32768];
+        let mut length = path.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            ::windows::core::PWSTR(path.as_mut_ptr()),
+            &mut length,
+        );
+        let _ = CloseHandle(process);
+        result.ok()?;
+        let path = String::from_utf16_lossy(&path[..length as usize]);
+        let name = std::path::Path::new(&path).file_name()?.to_str()?;
+        normalize_fullscreen_executable(name)
+    }
+}
+
+/// A few physical pixels account for DWM/DPI edge rounding without treating a
+/// normal taskbar-sized work area as the whole display.
+fn covers_monitor(surface: RECT, monitor: RECT) -> bool {
+    surface.right > surface.left
+        && surface.bottom > surface.top
+        && surface.left <= monitor.left + 2
+        && surface.top <= monitor.top + 2
+        && surface.right >= monitor.right - 2
+        && surface.bottom >= monitor.bottom - 2
+}
+
+fn intersects_monitor(surface: RECT, monitor: RECT) -> bool {
+    surface.left < monitor.right
+        && surface.right > monitor.left
+        && surface.top < monitor.bottom
+        && surface.bottom > monitor.top
+}
+
+struct FullscreenQuery {
+    overlay: HWND,
+    monitor: RECT,
+    foreground_owner: HWND,
+    foreground_on_monitor: bool,
+    own_process: u32,
+    covered: bool,
+    automatic: bool,
+    always_hide: Vec<String>,
+    always_show: Vec<String>,
+    matched_override: Option<bool>,
+}
+
+unsafe extern "system" fn fullscreen_candidate(candidate: HWND, data: LPARAM) -> BOOL {
+    // SAFETY: EnumWindows calls synchronously with our live stack query. Every
+    // Win32 output is initialized; no HWND or pointer is retained past this call.
+    unsafe {
+        let query = &mut *(data.0 as *mut FullscreenQuery);
+        let mut process = 0;
+        GetWindowThreadProcessId(candidate, Some(&mut process));
+        if candidate == query.overlay
+            || process == query.own_process
+            || !IsWindowVisible(candidate).as_bool()
+            || IsIconic(candidate).as_bool()
+            || GetWindowLongPtrW(candidate, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0
+        {
+            return BOOL(1);
+        }
+        if query.foreground_on_monitor
+            && GetAncestor(candidate, GA_ROOTOWNER) != query.foreground_owner
+        {
+            return BOOL(1);
+        }
+        let mut class = [0_u16; 128];
+        let count = GetClassNameW(candidate, &mut class).max(0) as usize;
+        if matches!(
+            String::from_utf16_lossy(&class[..count]).as_str(),
+            "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+        ) {
+            return BOOL(1);
+        }
+        let mut cloaked = 0_u32;
+        let _ = ::windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            candidate,
+            ::windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            size_of::<u32>() as u32,
+        );
+        if cloaked != 0 {
+            return BOOL(1);
+        }
+        let mut outer = RECT::default();
+        if GetWindowRect(candidate, &mut outer).is_err()
+            || !intersects_monitor(outer, query.monitor)
+        {
+            return BOOL(1);
+        }
+        // EnumWindows traverses z order. With focus on a different monitor, the
+        // first visible app touching this monitor wins; never discover a buried
+        // fullscreen window underneath an ordinary window.
+        let continue_search = query.foreground_on_monitor;
+        if (!query.always_hide.is_empty() || !query.always_show.is_empty())
+            && let Some(value) = app_override(
+                executable_name(candidate).as_deref(),
+                &query.always_hide,
+                &query.always_show,
+            )
+        {
+            query.matched_override = Some(value);
+            query.covered = value;
+            return BOOL(0);
+        }
+        if !query.automatic {
+            return BOOL(continue_search as i32);
+        }
+        if !covers_monitor(outer, query.monitor) {
+            return BOOL(continue_search as i32);
+        }
+        // Client coverage distinguishes true borderless fullscreen from an
+        // ordinary maximized frame, especially with an auto-hidden taskbar.
+        let mut client = RECT::default();
+        if GetClientRect(candidate, &mut client).is_err() {
+            return BOOL(continue_search as i32);
+        }
+        let mut origin = POINT {
+            x: client.left,
+            y: client.top,
+        };
+        if !ClientToScreen(candidate, &mut origin).as_bool() {
+            return BOOL(continue_search as i32);
+        }
+        let client = RECT {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + client.right - client.left,
+            bottom: origin.y + client.bottom - client.top,
+        };
+        if covers_monitor(client, query.monitor) {
+            query.covered = true;
+            return BOOL(0);
+        }
+        BOOL(continue_search as i32)
+    }
+}
+
+unsafe fn monitor_has_fullscreen(
+    overlay: HWND,
+    monitor: HMONITOR,
+    bounds: RECT,
+    automatic: bool,
+    always_hide: &[String],
+    always_show: &[String],
+) -> bool {
+    // SAFETY: all queries are read-only and EnumWindows retains no callback state.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_on_monitor = !foreground.is_invalid()
+            && MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL) == monitor;
+        let mut query = FullscreenQuery {
+            overlay,
+            monitor: bounds,
+            foreground_owner: GetAncestor(foreground, GA_ROOTOWNER),
+            foreground_on_monitor,
+            own_process: GetCurrentProcessId(),
+            covered: false,
+            automatic,
+            always_hide: always_hide.to_vec(),
+            always_show: always_show.to_vec(),
+            matched_override: None,
+        };
+        let _ = EnumWindows(
+            Some(fullscreen_candidate),
+            LPARAM(&mut query as *mut _ as isize),
+        );
+        query.matched_override.unwrap_or_else(|| {
+            query.covered
+                || (query.automatic
+                    && foreground_on_monitor
+                    && GetWindowLongPtrW(foreground, GWL_STYLE) as u32
+                        & (WS_CAPTION.0 | WS_THICKFRAME.0)
+                        == 0
+                    && SHQueryUserNotificationState().is_ok_and(|state| {
+                        state == QUNS_PRESENTATION_MODE || state == QUNS_RUNNING_D3D_FULL_SCREEN
+                    }))
+        })
     }
 }
 
@@ -423,7 +802,7 @@ pub fn diagnostic_snapshot() -> String {
         let mut rect = RECT::default();
         let rect_ok = GetWindowRect(hwnd, &mut rect).is_ok();
         let dpi = GetDpiForWindow(hwnd);
-        let scale = dpi as f64 / 96.;
+        let scale = dpi.max(96) as f64 / 96. * shape.ui_scale;
         let styles = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         let foreground = GetForegroundWindow() == hwnd;
         let mut backdrop = 0i32;
@@ -437,7 +816,7 @@ pub fn diagnostic_snapshot() -> String {
         let _ = GetWindowDisplayAffinity(hwnd, &mut affinity);
         let rgn = CreateRectRgn(0, 0, 0, 0);
         let region_kind = GetWindowRgn(hwnd, rgn);
-        let center_x = (210. * scale).round() as i32;
+        let center_x = (shape.canvas_width * 0.5 * scale).round() as i32;
         let center_y = (shape.height * 0.5 * scale).round() as i32;
         let center_in = PtInRegion(rgn, center_x, center_y).as_bool();
         let corner_in = PtInRegion(rgn, 0, 0).as_bool();
@@ -457,7 +836,7 @@ pub fn diagnostic_snapshot() -> String {
         }) == hwnd;
         let _ = DeleteObject(HGDIOBJ(rgn.0));
         format!(
-            "native: hwnd={:#x} rect_ok={} rect=({},{})-({},{}) dpi={} exstyles={:#x} toolwindow={} noactivate={} appwindow={} topmost={} foreground={} region_kind={} region_center={} region_canvas_corner={} hit_center={} hit_canvas_corner={} backdrop={} affinity={:#x} center_target={:#x} center_class={} center_pid={}",
+            "native: hwnd={:#x} rect_ok={} rect=({},{})-({},{}) dpi={} ui_scale={} exstyles={:#x} toolwindow={} noactivate={} appwindow={} topmost={} foreground={} region_kind={} region_center={} region_canvas_corner={} hit_center={} hit_canvas_corner={} backdrop={} affinity={:#x} center_target={:#x} center_class={} center_pid={}",
             hwnd.0 as usize,
             rect_ok,
             rect.left,
@@ -465,6 +844,7 @@ pub fn diagnostic_snapshot() -> String {
             rect.right,
             rect.bottom,
             dpi,
+            shape.ui_scale,
             styles,
             styles & WS_EX_TOOLWINDOW.0 != 0,
             styles & WS_EX_NOACTIVATE.0 != 0,
@@ -493,21 +873,28 @@ fn position() {
     if hwnd.is_invalid() {
         return;
     }
-    // SAFETY: stack output buffers are initialized; primary monitor handle remains
+    // SAFETY: stack output buffers are initialized; selected monitor handle remains
     // valid for the duration of the call. SetWindowPos never activates the overlay.
     unsafe {
         let id = NATIVE.with(|n| n.borrow().monitor_id.clone());
         let Some((monitor, info)) = super::display::selected(&id) else {
             return;
         };
-        let mut dpi = 96;
-        let mut dy = 96;
-        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dy);
-        let scale = dpi as f64 / 96.;
-        let width = (420. * scale).round() as i32;
-        let height = (220. * scale).round() as i32;
+        let dpi_scale = super::display::scale(monitor);
+        let (width, height) = super::display::canvas_size(
+            dpi_scale,
+            shape.ui_scale,
+            shape.canvas_width,
+            shape.canvas_height,
+        );
         let x = info.rcMonitor.left + (info.rcMonitor.right - info.rcMonitor.left - width) / 2;
-        let y = info.rcMonitor.top + (shape.offset * scale).round() as i32;
+        let y = info.rcMonitor.top
+            + (if shape.form == FormFactor::Notch {
+                0.
+            } else {
+                shape.offset
+            } * dpi_scale)
+                .round() as i32;
         let _ = SetWindowPos(
             hwnd,
             Some(if shape.topmost {
@@ -538,12 +925,31 @@ fn region() {
     // A window region excludes desktop pixels from both painting and input,
     // including clicks to other processes (HTTRANSPARENT alone cannot do this).
     unsafe {
-        let scale = GetDpiForWindow(hwnd).max(96) as f64 / 96.;
-        let left = ((420. - shape.width) * 0.5 * scale).floor() as i32;
-        let right = ((420. + shape.width) * 0.5 * scale).ceil() as i32;
-        let height = (shape.height * scale).ceil() as i32;
-        let diameter = (shape.radius.min(shape.height / 2.) * 2. * scale).round() as i32;
-        let r = CreateRoundRectRgn(left - 1, -1, right + 1, height + 1, diameter, diameter);
+        let scale = GetDpiForWindow(hwnd).max(96) as f64 / 96. * shape.ui_scale;
+        let contour = ShapeContour::new(shape.width, shape.height, shape.radius, shape.form);
+        let raw = contour.flattened(scale);
+        let left = (shape.canvas_width - contour.total_width()) * scale / 2.;
+        let count = raw.len();
+        let points: Vec<POINT> = raw
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                // Expand one physical pixel along the outward polygon bisector,
+                // preserving the antialias fringe without a rectangular input mask.
+                let previous = raw[(i + count - 1) % count];
+                let next = raw[(i + 1) % count];
+                let v = [next[0] - previous[0], next[1] - previous[1]];
+                let length = v[0].hypot(v[1]).max(1e-6);
+                POINT {
+                    x: (left + p[0] + v[1] / length).round() as i32,
+                    y: (p[1] - v[0] / length).round() as i32,
+                }
+            })
+            .collect();
+        let r = CreatePolygonRgn(&points, WINDING);
+        if r.0.is_null() {
+            return;
+        }
         if SetWindowRgn(hwnd, Some(r), false) == 0 {
             let _ = DeleteObject(HGDIOBJ(r.0));
         }
@@ -560,6 +966,12 @@ unsafe extern "system" fn subclass(
 ) -> LRESULT {
     // SAFETY: Windows invokes this only for the subclassed UI-thread HWND.
     unsafe {
+        if super::power::is_power_event(msg, wparam.0) {
+            if let Ok(snapshot) = super::power::snapshot() {
+                emit(Event::Battery(snapshot));
+            }
+            return LRESULT(1);
+        }
         match msg {
             WM_STYLECHANGING => {
                 // Winit recomputes styles when visibility or DPI changes. Keep
@@ -569,9 +981,14 @@ unsafe extern "system" fn subclass(
                 // the synchronous duration of this message.
                 let proposed = &mut *(lparam.0 as *mut STYLESTRUCT);
                 if wparam.0 as i32 == GWL_EXSTYLE.0 {
+                    let activating = NATIVE.with(|n| n.borrow().keyboard_mode);
                     proposed.styleNew =
-                        (proposed.styleNew | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0)
-                            & !WS_EX_APPWINDOW.0;
+                        (proposed.styleNew | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
+                    if activating {
+                        proposed.styleNew &= !WS_EX_NOACTIVATE.0;
+                    } else {
+                        proposed.styleNew |= WS_EX_NOACTIVATE.0;
+                    }
                     let topmost = NATIVE.with(|n| n.borrow().shape.topmost);
                     if topmost {
                         proposed.styleNew |= WS_EX_TOPMOST.0;
@@ -580,6 +997,9 @@ unsafe extern "system" fn subclass(
                     }
                 } else if wparam.0 as i32 == GWL_STYLE.0 {
                     proposed.styleNew &= !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_BORDER.0);
+                    if NATIVE.with(|n| n.borrow().hidden) {
+                        proposed.styleNew &= !WS_VISIBLE.0;
+                    }
                 }
             }
             WM_WINDOWPOSCHANGING => {
@@ -587,8 +1007,20 @@ unsafe extern "system" fn subclass(
                 // belongs to Windows and is not retained after the callback.
                 let proposed = &mut *(lparam.0 as *mut WINDOWPOS);
                 proposed.flags |= SWP_NOACTIVATE;
+                // Backend DPI/style/visibility updates must not undo desktop
+                // suppression after the policy has hidden this persistent HWND.
+                if NATIVE.with(|n| n.borrow().hidden) {
+                    proposed.flags &= !SWP_SHOWWINDOW;
+                    proposed.flags |= SWP_HIDEWINDOW;
+                }
             }
-            WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+            WM_MOUSEACTIVATE => {
+                return LRESULT(if NATIVE.with(|n| n.borrow().keyboard_mode) {
+                    MA_ACTIVATE
+                } else {
+                    MA_NOACTIVATE
+                } as isize);
+            }
             WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
                 let result = DefSubclassProc(hwnd, msg, wparam, lparam);
                 let post = NATIVE.with(|n| {
@@ -607,6 +1039,10 @@ unsafe extern "system" fn subclass(
             }
             WM_HOTKEY if wparam.0 as i32 == HOTKEY => {
                 emit(Event::HotkeyToggle);
+                return LRESULT(0);
+            }
+            WM_HOTKEY if (LAUNCHER_HOTKEY..=LAUNCHER_HOTKEY + 2).contains(&(wparam.0 as i32)) => {
+                emit(Event::LauncherToggle);
                 return LRESULT(0);
             }
             CLOSE_PANEL => {
@@ -647,6 +1083,7 @@ unsafe extern "system" fn subclass(
                 return LRESULT(0);
             }
             WM_NCDESTROY => {
+                NATIVE.with(|n| n.borrow_mut().power.take());
                 let _ = RemoveWindowSubclass(hwnd, Some(subclass), SUBCLASS);
             }
             _ => {}
@@ -711,121 +1148,24 @@ unsafe fn make_icon() -> Result<HICON, String> {
 }
 
 fn popup() {
-    // SAFETY: all menus are local to this call and destroyed after the modal
-    // popup returns. DestroyMenu recursively destroys attached submenus.
+    // SAFETY: menus are created and consumed on the UI thread. DestroyMenu
+    // releases the root and its attached development submenu after tracking.
     unsafe {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
-        let Ok(settings) = CreatePopupMenu() else {
-            let _ = DestroyMenu(menu);
-            return;
-        };
-        let Ok(demo) = CreatePopupMenu() else {
-            let _ = DestroyMenu(settings);
-            let _ = DestroyMenu(menu);
-            return;
-        };
-        let (hwnd, shape, animations) = NATIVE.with(|n| {
-            let n = n.borrow();
-            (n.hwnd, n.shape, n.animations)
-        });
-        let add = |m, id, label: &str, flags| {
+        let hwnd = NATIVE.with(|n| n.borrow().hwnd);
+        let add = |menu, id, label: &str, flags| {
             let text: Vec<u16> = label.encode_utf16().chain([0]).collect();
-            let _ = AppendMenuW(m, flags, id, PCWSTR(text.as_ptr()));
+            AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()))
         };
-        add(menu, 1, "Show Island", MF_STRING);
-        add(menu, 5, "Settings…", MF_STRING);
-        add(menu, 2, "Reset Island", MF_STRING);
-        add(
-            settings,
-            10,
-            "Animations",
-            MF_STRING | if animations { MF_CHECKED } else { MF_UNCHECKED },
-        );
-        add(
-            settings,
-            11,
-            "Always on top",
-            MF_STRING
-                | if shape.topmost {
-                    MF_CHECKED
-                } else {
-                    MF_UNCHECKED
-                },
-        );
-        add(settings, 12, "Top offset: flush", MF_STRING);
-        add(settings, 13, "Top offset: 6 px", MF_STRING);
-        add(settings, 14, "Top offset: 12 px", MF_STRING);
-        let (appearance, opacity, bounce) = NATIVE.with(|n| {
-            let n = n.borrow();
-            (n.appearance, n.opacity, n.bounce)
-        });
-        // All submenus are owned by the root menu after attachment.
-        if let Ok(material) = CreatePopupMenu() {
-            for (id, label, value) in [
-                (30, "Solid black", Appearance::Solid),
-                (31, "Transparent", Appearance::Transparent),
-                (32, "Acrylic blur", Appearance::Acrylic),
-                (33, "Eco liquid glass", Appearance::Glass),
-                (34, "Live liquid glass (higher cost)", Appearance::LiveGlass),
-            ] {
-                add(
-                    material,
-                    id,
-                    label,
-                    MF_STRING
-                        | if appearance == value {
-                            MF_CHECKED
-                        } else {
-                            MF_UNCHECKED
-                        },
-                );
-            }
-            add(settings, material.0 as usize, "Material", MF_POPUP);
-        }
-        if let Ok(tint) = CreatePopupMenu() {
-            for (id, label, value) in [
-                (40, "Light tint (25%)", 0.25f32),
-                (41, "Balanced tint (55%)", 0.55),
-                (42, "Dark tint (80%)", 0.8),
-            ] {
-                add(
-                    tint,
-                    id,
-                    label,
-                    MF_STRING
-                        | if (opacity - value).abs() < 0.01 {
-                            MF_CHECKED
-                        } else {
-                            MF_UNCHECKED
-                        },
-                );
-            }
-            add(settings, tint.0 as usize, "Transparency", MF_POPUP);
-        }
-        if let Ok(motion) = CreatePopupMenu() {
-            for (id, label, value) in [
-                (50, "Soft", Bounce::Soft),
-                (51, "Balanced bounce", Bounce::Balanced),
-                (52, "Lively bounce", Bounce::Lively),
-            ] {
-                add(
-                    motion,
-                    id,
-                    label,
-                    MF_STRING
-                        | if bounce == value {
-                            MF_CHECKED
-                        } else {
-                            MF_UNCHECKED
-                        },
-                );
-            }
-            add(settings, motion.0 as usize, "Spring response", MF_POPUP);
-        }
-        add(menu, settings.0 as usize, "Settings", MF_POPUP);
-        if cfg!(debug_assertions) || std::env::args().any(|a| a == "--demo") {
+        let _ = add(menu, 1, "Show Island", MF_STRING);
+        let _ = add(menu, 6, "Countdown timer", MF_STRING);
+        let _ = add(menu, 5, "Settings…", MF_STRING);
+        let _ = add(menu, 2, "Reset Island", MF_STRING);
+        if (cfg!(debug_assertions) || std::env::args().any(|a| a == "--demo"))
+            && let Ok(demo) = CreatePopupMenu()
+        {
             for (id, label) in [
                 (20, "Idle"),
                 (21, "Compact"),
@@ -833,14 +1173,15 @@ fn popup() {
                 (23, "Volume"),
                 (24, "Media"),
             ] {
-                add(demo, id, label, MF_STRING);
+                let _ = add(demo, id, label, MF_STRING);
             }
-            add(menu, demo.0 as usize, "Demo states", MF_POPUP);
-        } else {
-            let _ = DestroyMenu(demo);
+            if add(menu, demo.0 as usize, "Development states", MF_POPUP).is_err() {
+                // Failed attachment leaves ownership with this call.
+                let _ = DestroyMenu(demo);
+            }
         }
-        add(menu, 0, "", MF_SEPARATOR);
-        add(menu, 4, "Exit", MF_STRING);
+        let _ = add(menu, 0, "", MF_SEPARATOR);
+        let _ = add(menu, 4, "Exit", MF_STRING);
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
         let _ = SetForegroundWindow(hwnd);
@@ -861,27 +1202,12 @@ fn popup() {
             2 => emit(Event::Reset),
             4 => emit(Event::Exit),
             5 => emit(Event::OpenSettings),
-            10 => emit(Event::ToggleAnimations),
-            11 => emit(Event::ToggleTopmost),
-            12 => emit(Event::Offset(0.)),
-            13 => emit(Event::Offset(6.)),
-            14 => emit(Event::Offset(12.)),
+            6 => emit(Event::State(IslandState::Timer)),
             20 => emit(Event::State(IslandState::Idle)),
             21 => emit(Event::State(IslandState::Compact)),
             22 => emit(Event::State(IslandState::Expanded)),
             23 => emit(Event::State(IslandState::Volume)),
             24 => emit(Event::State(IslandState::Media)),
-            30 => emit(Event::Appearance(Appearance::Solid)),
-            31 => emit(Event::Appearance(Appearance::Transparent)),
-            32 => emit(Event::Appearance(Appearance::Acrylic)),
-            33 => emit(Event::Appearance(Appearance::Glass)),
-            34 => emit(Event::Appearance(Appearance::LiveGlass)),
-            40 => emit(Event::Opacity(0.25)),
-            41 => emit(Event::Opacity(0.55)),
-            42 => emit(Event::Opacity(0.8)),
-            50 => emit(Event::Bounce(Bounce::Soft)),
-            51 => emit(Event::Bounce(Bounce::Balanced)),
-            52 => emit(Event::Bounce(Bounce::Lively)),
             _ => {}
         }
     }
@@ -892,6 +1218,7 @@ impl Drop for InstanceGuard {
         let (hwnd, icon) = NATIVE.with(|n| {
             let mut n = n.borrow_mut();
             n.handler = None;
+            n.power.take();
             for hook in n.hooks.drain(..) {
                 unsafe {
                     let _ = UnhookWinEvent(hook);
@@ -906,6 +1233,9 @@ impl Drop for InstanceGuard {
             if !hwnd.is_invalid() {
                 let _ = WTSUnRegisterSessionNotification(hwnd);
                 let _ = UnregisterHotKey(Some(hwnd), HOTKEY);
+                for index in 0..3 {
+                    let _ = UnregisterHotKey(Some(hwnd), LAUNCHER_HOTKEY + index);
+                }
                 let (mouse, keyboard) = NATIVE.with(|n| {
                     let n = n.borrow();
                     (n.mouse_hook, n.keyboard_hook)
@@ -929,13 +1259,11 @@ impl Drop for InstanceGuard {
 
 /// Apply documented Windows 11 compositor backdrops. Success indicates DWM accepted
 /// the material; Windows may choose a solid accessibility/battery-saver fallback.
-pub fn set_appearance(appearance: Appearance, opacity: f32, bounce: Bounce) -> Result<(), String> {
+pub fn set_appearance(appearance: Appearance) -> Result<(), String> {
     use ::windows::Win32::Graphics::Dwm::*;
     let hwnd = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
         n.appearance = appearance;
-        n.opacity = opacity;
-        n.bounce = bounce;
         n.hwnd
     });
     if hwnd.is_invalid() {
@@ -1014,7 +1342,7 @@ unsafe extern "system" fn backdrop_event(
     event: u32,
     source: HWND,
     object: i32,
-    _child: i32,
+    child: i32,
     _thread: u32,
     _time: u32,
 ) {
@@ -1026,7 +1354,7 @@ unsafe extern "system" fn backdrop_event(
     if event == EVENT_OBJECT_LOCATIONCHANGE && unsafe { GetAncestor(source, GA_ROOT) } != source {
         return;
     }
-    if event == EVENT_OBJECT_LOCATIONCHANGE && object != OBJID_WINDOW.0 {
+    if event >= EVENT_OBJECT_CREATE && (object != OBJID_WINDOW.0 || child != 0) {
         return;
     }
     queue_policy();
@@ -1129,7 +1457,7 @@ pub fn capture_snapshot() -> Result<super::capture::BackdropFrame, String> {
         let mut pixels =
             std::slice::from_raw_parts(bits as *const u8, width as usize * height as usize * 4)
                 .to_vec();
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
             pixel[3] = 255;
         }
@@ -1146,5 +1474,86 @@ pub fn settle_exclusion() {
     // Used only when a material is selected, never as a frame scheduler.
     unsafe {
         let _ = ::windows::Win32::Graphics::Dwm::DwmFlush();
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_tests {
+    use super::*;
+    #[test]
+    fn executable_overrides_are_normalized_and_conflicts_hide_first() {
+        assert_eq!(
+            normalize_fullscreen_executable(" Game.EXE ").as_deref(),
+            Some("game.exe")
+        );
+        assert_eq!(
+            normalize_fullscreen_executable("Game").as_deref(),
+            Some("game.exe")
+        );
+        assert_eq!(
+            normalize_fullscreen_executable("My Game.exe").as_deref(),
+            Some("my game.exe")
+        );
+        for invalid in [
+            "",
+            "C:\\Games\\Game.exe",
+            "../game.exe",
+            "game.exe\n--flag",
+            "\"game.exe\"",
+        ] {
+            assert!(normalize_fullscreen_executable(invalid).is_none());
+        }
+        let hide = vec!["game.exe".to_string()];
+        let show = vec!["game.exe".to_string(), "player.exe".to_string()];
+        assert_eq!(app_override(Some("game.exe"), &hide, &show), Some(true));
+        assert_eq!(app_override(Some("player.exe"), &hide, &show), Some(false));
+        assert_eq!(app_override(Some("other.exe"), &hide, &show), None);
+        assert_eq!(app_override(None, &hide, &show), None);
+    }
+    #[test]
+    fn fullscreen_coverage_accepts_dpi_rounding_and_spanning_surfaces() {
+        let monitor = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        assert!(covers_monitor(monitor, monitor));
+        assert!(covers_monitor(
+            RECT {
+                left: -1919,
+                top: 1,
+                right: -1,
+                bottom: 1079
+            },
+            monitor
+        ));
+        assert!(covers_monitor(
+            RECT {
+                left: -1920,
+                top: 0,
+                right: 1920,
+                bottom: 1080
+            },
+            monitor
+        ));
+    }
+    #[test]
+    fn maximized_work_area_and_captioned_client_are_not_fullscreen() {
+        let monitor = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(!covers_monitor(
+            RECT {
+                bottom: 1040,
+                ..monitor
+            },
+            monitor
+        ));
+        assert!(!covers_monitor(RECT { top: 31, ..monitor }, monitor));
+        assert!(!covers_monitor(RECT::default(), monitor));
     }
 }

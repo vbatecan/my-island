@@ -1,0 +1,9 @@
+# Notch and battery milestone
+
+The shared contour owns concave shoulders, rounded lower corners, optical distance/normals, gesture containment, and native polygon boundaries. The transparent canvas is 480×220 logical pixels. Notch mode uses a Slint path; Island mode retains native Slint rounded rectangles for its background to avoid SVG arc-extents differences at capsule dimensions. Glass alpha follows the shared analytic contour. Contents stay inside the clipped central body; Path.clip is not used as an arbitrary child mask.
+
+Battery status uses GetSystemPowerStatus plus window-delivered power notifications. Registrations are owned and released with the native window. No worker, polling timer, network request, or OS power-policy change is introduced. Events are deduplicated; deferred previews expire after ten seconds and visible previews after three. First observation is a silent baseline.
+
+Verification: 85 unit tests pass, including geometry at multiple DPI factors, spring overshoot bounds, glass shoulder alpha, battery normalization/thresholds, and presentation precedence. Synthetic battery GUI checks exercise compact preview, details, dismissal, idle restoration, and stopped scheduling. Native readback at 96 DPI confirms flush top positioning, topmost/tool/nonactivating styles, center hit routing, and an excluded canvas corner. Existing hover/pin/countdown regressions and material/form renderer checks are run separately.
+
+Physical charger transitions, manual pointer checks at shoulder boundaries, additional hardware DPI configurations, and exhaustive native acrylic/Live glass compositor behavior remain device-test limitations. No new release memory, CPU, or GPU measurements are claimed. Synthetic battery captures do not establish physical device delivery; native registration and initial status reads run in the Windows application.

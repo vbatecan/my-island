@@ -1,0 +1,8 @@
+[package]
+name="still-island-plugin-developer"
+version="0.1.0"
+edition="2024"
+rust-version="1.92"
+license="MIT"
+[dependencies]
+still-island-plugin-sdk={path="../../crates/plugin-sdk"}

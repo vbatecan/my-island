@@ -2,6 +2,7 @@
 //! No time uniform, animation loop, screen capture, or global state lives here.
 //! The rounded-box distance gradient defines a beveled normal; Snell refraction
 //! displaces backdrop samples and Schlick Fresnel supplies restrained rim reflection.
+use crate::shape::{FormFactor, ShapeContour};
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 #[derive(Clone, Debug)]
@@ -14,7 +15,17 @@ pub struct Backdrop {
 pub struct Glass {
     pub backdrop: Option<Backdrop>,
     revision: u64,
-    cache: Option<((u32, u32, u32, u32, u64), Image)>,
+    cache: Option<(GlassCacheKey, Image)>,
+}
+#[derive(PartialEq, Eq)]
+struct GlassCacheKey {
+    width: u32,
+    height: u32,
+    radius_subpixels: u32,
+    scale_bits: u32,
+    canvas_width_bits: u32,
+    backdrop_revision: u64,
+    form: FormFactor,
 }
 impl Glass {
     pub fn set_backdrop(&mut self, mut frame: Backdrop) -> bool {
@@ -36,37 +47,71 @@ impl Glass {
         self.backdrop = None;
         self.cache = None;
     }
-    pub fn image(&mut self, width: f64, height: f64, radius: f64, scale: f32) -> Image {
-        let scale = scale.clamp(1., 4.);
-        let w = (width as f32 * scale).ceil().max(1.) as u32;
+    #[cfg(test)]
+    pub fn image(
+        &mut self,
+        width: f64,
+        height: f64,
+        radius: f64,
+        scale: f32,
+        form: FormFactor,
+    ) -> Image {
+        self.image_in_canvas(
+            width,
+            height,
+            radius,
+            scale,
+            form,
+            crate::state::OVERLAY_WIDTH,
+        )
+    }
+
+    pub fn image_in_canvas(
+        &mut self,
+        width: f64,
+        height: f64,
+        radius: f64,
+        scale: f32,
+        form: FormFactor,
+        canvas_width: f64,
+    ) -> Image {
+        // User zoom can reduce the effective pixel scale below one. Preserve the
+        // exact capture-to-canvas mapping instead of sampling a larger phantom crop.
+        let scale = scale.clamp(0.5, 8.);
+        let canvas_width = if canvas_width.is_finite() {
+            canvas_width.clamp(crate::state::OVERLAY_WIDTH, 4096.) as f32
+        } else {
+            crate::state::OVERLAY_WIDTH as f32
+        };
+        let contour = ShapeContour::new(width, height, radius, form);
+        let w = (contour.total_width() as f32 * scale).ceil().max(1.) as u32;
         let h = (height as f32 * scale).ceil().max(1.) as u32;
         let r = radius as f32 * scale;
-        let key = (
-            w,
-            h,
-            (r * 64.).round() as u32,
-            scale.to_bits(),
-            self.revision,
-        );
-        if let Some((old, image)) = &self.cache {
-            if *old == key {
-                return image.clone();
-            }
+        let key = GlassCacheKey {
+            width: w,
+            height: h,
+            radius_subpixels: (r * 64.).round() as u32,
+            scale_bits: scale.to_bits(),
+            canvas_width_bits: canvas_width.to_bits(),
+            backdrop_revision: self.revision,
+            form,
+        };
+        if let Some((old, image)) = &self.cache
+            && *old == key
+        {
+            return image.clone();
         }
         let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
-        let left = (420. * scale - w as f32) * 0.5;
+        let left = (canvas_width * scale - w as f32) * 0.5;
         let bezel = (12. * scale).min(h as f32 * 0.46);
         for y in 0..h {
             for x in 0..w {
-                let p = [
-                    x as f32 + 0.5 - w as f32 / 2.,
-                    y as f32 + 0.5 - h as f32 / 2.,
-                ];
-                let (d, n) = rounded_distance_normal(
-                    p,
-                    [w as f32 / 2., h as f32 / 2.],
-                    r.min(h as f32 / 2.),
+                let (distance, normal) = contour.distance_normal(
+                    (x as f64 + 0.5) / scale as f64,
+                    (y as f64 + 0.5) / scale as f64,
                 );
+                let d = distance as f32 * scale;
+                let n = [normal[0] as f32, normal[1] as f32];
                 let coverage = (0.5 - d).clamp(0., 1.);
                 if coverage <= 0. {
                     continue;
@@ -113,6 +158,7 @@ impl Glass {
     }
 }
 /// Exact rounded-box SDF with its outward unit gradient, including straight segments.
+#[cfg(test)]
 fn rounded_distance_normal(p: [f32; 2], half: [f32; 2], radius: f32) -> (f32, [f32; 2]) {
     let q = [p[0].abs() - half[0] + radius, p[1].abs() - half[1] + radius];
     let outside = [q[0].max(0.), q[1].max(0.)];
@@ -241,6 +287,42 @@ fn blur(frame: &mut Backdrop, radius: usize) {
 #[cfg(test)]
 mod compositor_tests {
     use super::*;
+
+    #[test]
+    fn changing_canvas_width_realigns_backdrop_and_invalidates_cached_image() {
+        let mut pixels = Vec::new();
+        for _ in 0..300 {
+            for x in 0..1200 {
+                pixels.extend_from_slice(&[(x / 5) as u8, 0, 0, 255]);
+            }
+        }
+        let mut glass = Glass::default();
+        glass.set_backdrop(Backdrop {
+            width: 1200,
+            height: 300,
+            pixels,
+        });
+        let first = glass
+            .image_in_canvas(360., 160., 8., 1., FormFactor::Notch, 800.)
+            .to_rgba8()
+            .unwrap();
+        let second = glass
+            .image_in_canvas(360., 160., 8., 1., FormFactor::Notch, 1200.)
+            .to_rgba8()
+            .unwrap();
+        let index = (80 * first.width() + first.width() / 2) as usize;
+        assert!(second.as_slice()[index].r > first.as_slice()[index].r + 30);
+    }
+
+    fn canvas_backdrop(color: [u8; 4]) -> Backdrop {
+        let width = crate::state::OVERLAY_WIDTH as u32;
+        let height = crate::state::OVERLAY_HEIGHT as u32;
+        Backdrop {
+            width,
+            height,
+            pixels: color.repeat((width * height) as usize),
+        }
+    }
     #[test]
     fn prefilter_preserves_constant_color_and_alpha() {
         let mut frame = Backdrop {
@@ -253,17 +335,78 @@ mod compositor_tests {
         assert_eq!(frame.pixels, expected);
     }
     #[test]
+    fn notch_lens_preserves_shoulder_cutouts_and_top_attachment() {
+        let mut glass = Glass::default();
+        let buffer = glass
+            .image(220., 48., 24., 1., FormFactor::Notch)
+            .to_rgba8()
+            .unwrap();
+        assert_eq!(buffer.width(), 236);
+        // Without a backdrop alpha is the rim reflection, so supply an opaque
+        // captured surface when checking coverage rather than reflectance.
+        glass.set_backdrop(canvas_backdrop([80, 80, 80, 255]));
+        let buffer = glass
+            .image(220., 48., 24., 1., FormFactor::Notch)
+            .to_rgba8()
+            .unwrap();
+        assert_eq!(buffer.as_slice()[4 * 236].a, 0);
+        assert_eq!(buffer.as_slice()[118].a, 255);
+        assert_eq!(buffer.as_slice()[4].a, 255);
+    }
+    #[test]
     fn lens_has_transparent_corners_and_samples_backdrop() {
         let mut glass = Glass::default();
-        glass.set_backdrop(Backdrop {
-            width: 420,
-            height: 220,
-            pixels: [100u8, 80, 60, 255].repeat(420 * 220),
-        });
-        let buffer = glass.image(220., 48., 24., 1.).to_rgba8().unwrap();
+        glass.set_backdrop(canvas_backdrop([100, 80, 60, 255]));
+        let buffer = glass
+            .image(220., 48., 24., 1., FormFactor::Island)
+            .to_rgba8()
+            .unwrap();
         assert_eq!(buffer.as_slice()[0].a, 0);
         let center = buffer.as_slice()[(24 * 220 + 110) as usize];
         assert_eq!(center.a, 255);
         assert!(center.r >= 100 && center.r < 150);
+    }
+
+    #[test]
+    fn wide_notch_material_preserves_coverage_at_fractional_scale() {
+        let mut glass = Glass::default();
+        glass.set_backdrop(canvas_backdrop([80, 80, 80, 255]));
+        let buffer = glass
+            .image(640., 216., 8., 1.5, FormFactor::Notch)
+            .to_rgba8()
+            .unwrap();
+        assert_eq!((buffer.width(), buffer.height()), (984, 324));
+        assert_eq!(buffer.as_slice()[6 * 984].a, 0);
+        assert_eq!(buffer.as_slice()[162 * 984 + 492].a, 255);
+    }
+
+    #[test]
+    fn user_zoom_keeps_glass_pixels_and_captured_canvas_in_the_same_space() {
+        for scale in [0.75, 1.5, 2.25] {
+            let width = (crate::state::OVERLAY_WIDTH as f32 * scale) as u32;
+            let height = (crate::state::OVERLAY_HEIGHT as f32 * scale) as u32;
+            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+            for _ in 0..height {
+                for x in 0..width {
+                    pixels.extend_from_slice(&[(x * 255 / (width - 1)) as u8, 80, 60, 255]);
+                }
+            }
+            let mut glass = Glass::default();
+            glass.set_backdrop(Backdrop {
+                width,
+                height,
+                pixels,
+            });
+            let image = glass
+                .image(220., 48., 8., scale, FormFactor::Notch)
+                .to_rgba8()
+                .unwrap();
+            assert_eq!(image.width(), (236. * scale).ceil() as u32);
+            assert_eq!(image.height(), (48. * scale).ceil() as u32);
+            let center = image.as_slice()
+                [((image.height() / 2) * image.width() + image.width() / 2) as usize];
+            assert_eq!(center.a, 255);
+            assert!((120..=140).contains(&center.r), "scale {scale}: {center:?}");
+        }
     }
 }

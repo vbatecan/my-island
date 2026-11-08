@@ -178,14 +178,60 @@ fn assert_fixture(service: &MediaService) -> Result<(), Box<dyn std::error::Erro
         Err("Fixture is no longer current; refusing to control another player".into())
     }
 }
+struct ChildFixture(std::process::Child);
+impl Drop for ChildFixture {
+    fn drop(&mut self) {
+        // Closing the input pipe requests graceful teardown of the hidden
+        // fixture, including its SMTC tokens and HWND. No other process is used.
+        drop(self.0.stdin.take());
+        let _ = self.0.wait();
+    }
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let secondary = std::env::args().any(|arg| arg == "--secondary-fixture");
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
-        SetCurrentProcessExplicitAppUserModelID(w!("StillIsland.IntegrationFixture"))?;
+        SetCurrentProcessExplicitAppUserModelID(if secondary {
+            w!("StillIsland.IntegrationFixture.Second")
+        } else {
+            w!("StillIsland.IntegrationFixture")
+        })?;
     }
     let buttons = Arc::new(AtomicU32::new(0));
     let fixture = create_fixture(buttons.clone())?;
+    if secondary {
+        metadata(&fixture.controls, "Still second fixture")?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            let _ = sender.send(());
+        });
+        let started = Instant::now();
+        while receiver.try_recv().is_err() && started.elapsed() < Duration::from_secs(30) {
+            pump(Duration::from_millis(25));
+        }
+        drop(fixture);
+        unsafe { RoUninitialize() };
+        return Ok(());
+    }
     let service = MediaService::new(|_| {})?;
+    let exposed = wait_for(&service, |s| {
+        s.players
+            .iter()
+            .any(|p| p.name.contains("IntegrationFixture") || p.name.contains("media-probe"))
+    });
+    if exposed {
+        let id = service
+            .snapshot()
+            .players
+            .iter()
+            .find(|p| p.name.contains("IntegrationFixture") || p.name.contains("media-probe"))
+            .unwrap()
+            .id
+            .clone();
+        service.select_player(id)?;
+    }
     if !wait_for(&service, |s| {
         s.available && s.artist == "Integration Fixture"
     }) {
@@ -233,6 +279,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "fixture command callbacks={}",
             buttons.load(Ordering::Relaxed)
         );
+        let first_id = service.snapshot().selected_player;
+        let previous_ids: Vec<_> = service
+            .snapshot()
+            .players
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        let second = ChildFixture(
+            std::process::Command::new(std::env::current_exe()?)
+                .arg("--secondary-fixture")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()?,
+        );
+        let second_exposed = wait_for(&service, |s| {
+            s.players.iter().any(|p| {
+                !previous_ids.contains(&p.id)
+                    && (p.name.contains("IntegrationFixture") || p.name.contains("media-probe"))
+            })
+        });
+        if second_exposed {
+            let second_id = service
+                .snapshot()
+                .players
+                .iter()
+                .find(|p| {
+                    !previous_ids.contains(&p.id)
+                        && (p.name.contains("IntegrationFixture") || p.name.contains("media-probe"))
+                })
+                .unwrap()
+                .id
+                .clone();
+            service.select_player(second_id.clone())?;
+            assert!(
+                wait_for(&service, |s| s.selected_player == second_id
+                    && s.title == "Still second fixture"),
+                "Second selection failed: {:?}",
+                service.snapshot()
+            );
+            println!("PASS explicit second-player selection and metadata");
+            service.select_player(first_id.clone())?;
+            assert!(wait_for(&service, |s| s.selected_player == first_id
+                && s.title == "Still fixture previous"));
+            println!("PASS switching back preserves original session identity");
+            service.select_player(second_id.clone())?;
+            assert!(wait_for(&service, |s| s.selected_player == second_id));
+            fixture
+                .controls
+                .SetPlaybackStatus(MediaPlaybackStatus::Playing)?;
+            assert!(wait_for(&service, |s| s
+                .players
+                .iter()
+                .any(|p| p.id == first_id && p.playing)));
+            assert_eq!(service.snapshot().selected_player, second_id);
+            service.select_player(String::new())?;
+            assert!(wait_for(&service, |s| s.selected_player.is_empty()
+                && s.playing
+                && s.title == "Still fixture previous"));
+            println!("PASS background playback updates and Automatic follows playing session");
+            service.select_player(second_id.clone())?;
+            assert!(wait_for(&service, |s| s.selected_player == second_id));
+            drop(second);
+            assert!(wait_for(&service, |s| s.selected_player.is_empty()
+                && !s.players.iter().any(|p| p.id == second_id)));
+            println!("PASS removed selection falls back to Automatic");
+        } else {
+            println!(
+                "UNVERIFIED: Windows did not expose the separate fixture process; multi-player selection not exposed"
+            );
+            drop(second);
+        }
     }
     drop(fixture);
     pump(Duration::from_millis(200));

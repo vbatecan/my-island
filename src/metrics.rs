@@ -24,19 +24,19 @@ impl RenderMetrics {
             slint::RenderingState::AfterRendering => {
                 let now = Instant::now();
                 if self.active.get() {
-                    if let Some(start) = self.started.take() {
-                        if self.durations.borrow().len() < 8192 {
-                            self.durations
-                                .borrow_mut()
-                                .push(now.duration_since(start).as_secs_f64() * 1000.);
-                        }
+                    if let Some(start) = self.started.take()
+                        && self.durations.borrow().len() < 8192
+                    {
+                        self.durations
+                            .borrow_mut()
+                            .push(now.duration_since(start).as_secs_f64() * 1000.);
                     }
-                    if let Some(previous) = self.previous.replace(Some(now)) {
-                        if self.intervals.borrow().len() < 8192 {
-                            self.intervals
-                                .borrow_mut()
-                                .push(now.duration_since(previous).as_secs_f64() * 1000.);
-                        }
+                    if let Some(previous) = self.previous.replace(Some(now))
+                        && self.intervals.borrow().len() < 8192
+                    {
+                        self.intervals
+                            .borrow_mut()
+                            .push(now.duration_since(previous).as_secs_f64() * 1000.);
                     }
                 } else {
                     self.idle_frames.set(self.idle_frames.get() + 1);

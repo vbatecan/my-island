@@ -325,23 +325,23 @@ impl Readback {
         {
             return Ok(None);
         }
-        if !self.last.is_empty() {
-            if let Ok(regions) = frame.DirtyRegions() {
-                let mut overlaps = false;
-                for i in 0..regions.Size()? {
-                    let region = regions.GetAt(i)?;
-                    if region.X < (self.left + self.width) as i32
-                        && region.Y < (self.top + self.height) as i32
-                        && region.X + region.Width > self.left as i32
-                        && region.Y + region.Height > self.top as i32
-                    {
-                        overlaps = true;
-                        break;
-                    }
+        if !self.last.is_empty()
+            && let Ok(regions) = frame.DirtyRegions()
+        {
+            let mut overlaps = false;
+            for i in 0..regions.Size()? {
+                let region = regions.GetAt(i)?;
+                if region.X < (self.left + self.width) as i32
+                    && region.Y < (self.top + self.height) as i32
+                    && region.X + region.Width > self.left as i32
+                    && region.Y + region.Height > self.top as i32
+                {
+                    overlaps = true;
+                    break;
                 }
-                if !overlaps {
-                    return Ok(None);
-                }
+            }
+            if !overlaps {
+                return Ok(None);
             }
         }
         // Maintain the same 30fps ceiling on older Windows builds without the
@@ -407,7 +407,12 @@ impl Readback {
                     row_bytes,
                 );
                 let output = &mut self.scratch[y * row_bytes..(y + 1) * row_bytes];
-                for (bgra, rgba) in row.chunks_exact(4).zip(output.chunks_exact_mut(4)) {
+                for (bgra, rgba) in row
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(output.as_chunks_mut::<4>().0)
+                {
                     rgba.copy_from_slice(&[bgra[2], bgra[1], bgra[0], 255]);
                 }
             }
@@ -419,8 +424,10 @@ impl Readback {
         if self.last.len() == self.scratch.len() {
             let substantial_pixels = self
                 .last
-                .chunks_exact(4)
-                .zip(self.scratch.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(self.scratch.as_chunks::<4>().0)
                 .filter(|(old, new)| (0..3).any(|channel| old[channel].abs_diff(new[channel]) > 3))
                 .take(32)
                 .count();

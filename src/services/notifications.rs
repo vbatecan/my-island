@@ -330,14 +330,10 @@ impl NotificationEvents {
                 >| {
                     if state.enabled.load(Ordering::Acquire)
                         && !state.stopping.load(Ordering::Acquire)
+                        && let Some(args) = args.as_ref()
+                        && let (Ok(id), Ok(kind)) = (args.UserNotificationId(), args.ChangeKind())
                     {
-                        if let Some(args) = args.as_ref() {
-                            if let (Ok(id), Ok(kind)) =
-                                (args.UserNotificationId(), args.ChangeKind())
-                            {
-                                let _ = state.sender.send(Command::Changed(id, kind));
-                            }
-                        }
+                        let _ = state.sender.send(Command::Changed(id, kind));
                     }
                     Ok(())
                 },
@@ -394,12 +390,11 @@ impl State {
             // bounded in-memory diff cache; no UI history or disk log is created.
             let count = existing.Size().map_err(|e| e.to_string())?.min(512);
             for index in 0..count {
-                if let Ok(notification) = existing.GetAt(index) {
-                    if let Ok(record) = record(&notification) {
-                        if record.created_ticks <= baseline_started {
-                            self.known.insert(record.id, record);
-                        }
-                    }
+                if let Ok(notification) = existing.GetAt(index)
+                    && let Ok(record) = record(&notification)
+                    && record.created_ticks <= baseline_started
+                {
+                    self.known.insert(record.id, record);
                 }
             }
             if listener.GetAccessStatus().map_err(|e| e.to_string())? != OsAccess::Allowed
@@ -470,17 +465,17 @@ impl State {
         {
             return self.refresh(listener, shared);
         }
-        if self.known.len() >= 512 && !self.known.contains_key(&id) {
-            if let Some(oldest) = self
+        if self.known.len() >= 512
+            && !self.known.contains_key(&id)
+            && let Some(oldest) = self
                 .known
                 .values()
                 .min_by_key(|value| value.created_ticks)
                 .map(|value| value.id)
-            {
-                self.known.remove(&oldest);
-                if self.displayed.remove(&oldest) {
-                    shared.emit(NotificationEvent::Removed(oldest));
-                }
+        {
+            self.known.remove(&oldest);
+            if self.displayed.remove(&oldest) {
+                shared.emit(NotificationEvent::Removed(oldest));
             }
         }
         let mut cached = value.clone();
@@ -534,10 +529,11 @@ fn cache_icon(cache: &mut HashMap<String, Vec<u8>>, app_id: &str, bytes: Vec<u8>
     if bytes.len() > 64 * 1024 {
         return;
     }
-    if cache.len() >= 32 && !cache.contains_key(app_id) {
-        if let Some(key) = cache.keys().next().cloned() {
-            cache.remove(&key);
-        }
+    if cache.len() >= 32
+        && !cache.contains_key(app_id)
+        && let Some(key) = cache.keys().next().cloned()
+    {
+        cache.remove(&key);
     }
     cache.insert(app_id.to_owned(), bytes);
 }
@@ -585,10 +581,10 @@ fn record(notification: &UserNotification) -> Result<NotificationRecord, String>
     let mut text = Vec::new();
     if let Some(elements) = elements {
         for index in 0..elements.Size().unwrap_or(0).min(12) {
-            if let Ok(item) = elements.GetAt(index) {
-                if let Ok(value) = item.Text() {
-                    text.push(value.to_string());
-                }
+            if let Ok(item) = elements.GetAt(index)
+                && let Ok(value) = item.Text()
+            {
+                text.push(value.to_string());
             }
         }
     }

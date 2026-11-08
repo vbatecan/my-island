@@ -1,0 +1,42 @@
+{
+  "id": "org.stillisland.obsidian",
+  "name": "Obsidian",
+  "version": "0.1.0",
+  "api_version": 1,
+  "entrypoint": "still-island-plugin-obsidian.exe",
+  "background": false,
+  "capabilities": [
+    "native_ui",
+    "activities",
+    "open_uri:obsidian"
+  ],
+  "actions": [
+    {
+      "id": "daily",
+      "label": "Daily note"
+    },
+    {
+      "id": "capture",
+      "label": "Create note"
+    },
+    {
+      "id": "text",
+      "label": "Note text"
+    }
+  ],
+  "views": [
+    {
+      "id": "main",
+      "label": "Overview"
+    }
+  ],
+  "config": [
+    {
+      "id": "vault",
+      "label": "Vault name",
+      "kind": "string",
+      "default": ""
+    }
+  ],
+  "assets": []
+}

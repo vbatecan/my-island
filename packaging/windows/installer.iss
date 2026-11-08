@@ -63,5 +63,20 @@ Name: "{userdesktop}\Still Island"; Filename: "{app}\still-island.exe"; WorkingD
 [Run]
 Filename: "{app}\still-island.exe"; Description: "Launch Still Island"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent unchecked
 
-; Preferences live outside {app}. No UninstallDelete, startup entries, services,
-; drivers, file associations, notification consent, or automatic launch are added.
+; Preferences live outside {app}. Startup remains opt-in in the application.
+; Uninstall removes only the Run value pointing to this exact installation.
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  StartupCommand: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run',
+      'StillIsland', StartupCommand) then
+    begin
+      if CompareText(StartupCommand, '"' + ExpandConstant('{app}\still-island.exe') + '"') = 0 then
+        RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'StillIsland');
+    end;
+  end;
+end;

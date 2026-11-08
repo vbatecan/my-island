@@ -1,22 +1,57 @@
-import { Button, CheckBox, ComboBox, Slider, SpinBox, ScrollView, Palette } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, Slider, SpinBox, ScrollView, Palette, TabWidget, LineEdit } from "std-widgets.slint";
 
 export struct NotificationApp { app-id: string, app-name: string, enabled: bool }
-component Heading inherits Text { font-size: 16px; font-weight: 600; color: #f0f0f5; vertical-stretch: 0; }
-component Label inherits Text { font-size: 13px; color: #dedee6; vertical-stretch: 0; }
+component Heading inherits Text { min-height: 28px; font-size: 16px; font-weight: 600; color: #f0f0f5; vertical-stretch: 0; }
+component Label inherits Text { font-size: 13px; color: #dedee6; vertical-stretch: 0; vertical-alignment: center; }
+// A shared form grid keeps every control clear of its label and aligns columns.
+component FieldLabel inherits Label { width: 200px; min-height: 32px; wrap: word-wrap; }
+component FieldRow inherits HorizontalLayout { spacing: 16px; min-height: 32px; vertical-stretch: 0; }
+component PageLayout inherits VerticalLayout { padding: 16px; spacing: 12px; }
 component Note inherits Text { font-size: 11px; color: #a6a6b2; wrap: word-wrap; vertical-stretch: 0; }
 component Rule inherits Rectangle { height: 1px; background: #ffffff12; vertical-stretch: 0; }
 
 export component SettingsWindow inherits Window {
     title: "Still Island Settings";
-    preferred-width: 600px; preferred-height: 650px;
-    min-width: 560px; min-height: 580px;
+    preferred-width: 600px; preferred-height: 680px;
+    min-width: 560px; min-height: 640px;
     background: #17171b;
     default-font-family: "Segoe UI Variable";
     default-font-size: 13px;
     in-out property <int> appearance-index: 0;
+    in-out property <int> form-factor-index: 0;
+    in-out property <int> notch-corner-radius: 8;
+    in-out property <int> notch-contracted-radius: 8;
+    in-out property <int> island-scale-percent: 100;
+    in-out property <int> text-scale-percent: 100;
+    in-out property <string> fullscreen-always-hide-text;
+    in-out property <string> fullscreen-always-show-text;
+    in-out property <int> preview-state: 1;
+    in-out property <bool> preview-animating: false;
+    private property <float> preview-display-width: root.preview-width;
+    private property <float> preview-display-height: root.preview-height;
+    animate preview-display-width, preview-display-height { duration: root.preview-animating && root.animations-enabled ? 320ms * 100 / max(50, root.animation-speed-percent) : 0ms; easing: ease-in-out; }
+    in property <float> preview-width: 376;
+    in property <float> preview-height: 160;
+    in property <string> preview-path;
+    in-out property <bool> advanced-appearance: false;
+    private property <int> layout-preset: 0;
+    callback preview-changed();
+    callback apply-layout-preset(int);
+    in-out property <bool> launch-at-startup: false;
+    in property <bool> startup-available: false;
+    in property <string> startup-status: "Launch at sign-in is not available for this installation.";
+    in-out property <bool> battery-previews: true;
     in-out property <float> tint: 0.55;
     in-out property <int> bounce-index: 1;
     in-out property <bool> animations-enabled: true;
+    in-out property <int> animation-speed-percent: 100;
+    in-out property <int> contracted-width: 126;
+    in-out property <int> contracted-height: 32;
+    in-out property <int> expanded-width: 360;
+    in-out property <int> expanded-height: 160;
+    in-out property <int> media-width: 640;
+    in-out property <int> media-height: 216;
+
     in-out property <bool> follow-reduced-motion: true;
     in-out property <int> top-offset: 6;
     in-out property <bool> island-always-on-top: true;
@@ -25,20 +60,29 @@ export component SettingsWindow inherits Window {
     in property <bool> notification-access-requestable: true;
     in property <string> notification-access: "Notification access has not been enabled.";
     in-out property <int> privacy-index: 0;
-    in-out property <int> notification-duration: 6;
+    in-out property <int> notification-duration: 5;
     in property <string> blocked-apps;
     in property <[NotificationApp]> observed-apps;
     in-out property <bool> auto-volume: true;
-    in-out property <bool> compact-now-playing: false;
+    in-out property <bool> compact-now-playing: true;
+    in-out property <bool> online-lyrics: true;
     in-out property <bool> hover-expand: false;
-    in-out property <int> hover-delay: 450;
+    in-out property <int> hover-delay: 350;
+    in-out property <int> collapse-delay: 350;
+    in-out property <bool> scroll-volume: true;
+    in-out property <bool> middle-mute: true;
+    in-out property <int> volume-step: 2;
     in-out property <bool> outside-click: true;
-    in-out property <bool> shortcut-enabled: false;
+    in-out property <bool> shortcut-enabled: true;
+    in-out property <bool> launcher-enabled: true;
+    in-out property <int> launcher-shortcut: 0;
+    callback clear-launcher-history();
     in-out property <bool> fullscreen-hide: true;
     in property <[string]> monitor-names: ["Primary display"];
     in-out property <int> monitor-index: 0;
     in property <string> status-text;
-    private property <int> page: 0;
+    in-out property <int> active-tab: 0;
+    callback manage-plugins();
     callback changed();
     callback reset-defaults();
     callback enable-notifications();
@@ -51,48 +95,105 @@ export component SettingsWindow inherits Window {
     keyboard := FocusScope {
         key-pressed(event) => { if event.text == Key.Escape { root.close-settings(); return accept; } return reject; }
         VerticalLayout {
-            padding: 24px; spacing: 14px;
+            padding: 24px; spacing: 12px;
             Text { text: "Make it yours"; font-size: 25px; font-weight: 600; color: white; vertical-stretch: 0; }
             Note { text: "A quiet island, tuned to your desktop. Changes save automatically."; }
-            HorizontalLayout {
-                spacing: 7px;
-                Button { text: "Appearance"; checkable: true; checked: root.page == 0; clicked => { root.page = 0; } }
-                Button { text: "Notifications"; checkable: true; checked: root.page == 1; clicked => { root.page = 1; } }
-                Button { text: "Behavior"; checkable: true; checked: root.page == 2; clicked => { root.page = 2; } }
-                Button { text: "Display"; checkable: true; checked: root.page == 3; clicked => { root.page = 3; } }
+            if root.active-tab == 0 : Rectangle {
+                height: 140px; vertical-stretch: 0;
+                HorizontalLayout { x: 0px; y: 0px; width: parent.width; height: 28px; spacing: 12px;
+                    Label { text: "Live preview"; horizontal-stretch: 1; }
+                    ComboBox { accessible-label: "Preview state"; model: ["Contracted", "Expanded", "Media"]; current-index <=> root.preview-state; selected => { root.preview-changed(); } }
+                }
+                preview-card := Rectangle {
+                    x: 0px; y: 36px; width: parent.width; height: 104px;
+                    background: #34343e; border-radius: 8px; clip: true;
+                    private property <float> fit: min(0.55 * root.island-scale-percent / 100, (self.width / 1px - 24) / max(root.media-width + 16, root.expanded-width + 16), 88 / max(root.media-height, root.expanded-height));
+                    preview-shape := Path {
+                        x: (parent.width - self.width) / 2; y: 0px;
+                        width: root.preview-display-width * preview-card.fit * 1px;
+                        height: root.preview-display-height * preview-card.fit * 1px;
+                        viewbox-x: 0; viewbox-y: 0; viewbox-width: root.preview-width; viewbox-height: root.preview-height;
+                        commands: root.preview-path; fill: root.appearance-index == 0 ? black : #000000.with-alpha(root.tint); stroke-width: 0px;
+                    }
+                    Text { x: preview-shape.x + 8px; y: max(0px, preview-shape.height / 2 - 12px); width: max(0px, preview-shape.width - 16px); height: 24px;
+                        text: root.preview-state == 0 ? "Still" : "Still Island"; color: white; font-size: (root.preview-state == 0 ? 13px : 18px) * preview-card.fit * root.text-scale-percent / 100;
+                        overflow: elide; horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    Text { x: 12px; y: parent.height - 20px; width: parent.width - 24px; height: 16px; font-size: 10px; color: #d0d0da;
+                        text: "Fitted preview · shape, text and tint update immediately"; horizontal-alignment: center;
+                    }
+                }
             }
-            Rule {}
-            Rectangle {
-                min-height: 330px;
-                if root.page == 0 : ScrollView {
+            tabs := TabWidget {
+                min-height: 180px;
+                current-index <=> root.active-tab;
+                Tab { title: "Appearance";
+                    ScrollView {
                     x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    VerticalLayout {
-                        padding-right: 14px; spacing: 14px;
+                    PageLayout {
+                        Heading { text: "Shape"; }
+                        ComboBox { accessible-label: "Overlay shape"; model: ["Notch · attached to display", "Island · floating capsule"]; current-index <=> root.form-factor-index; selected => { root.changed(); } }
+                        Note { text: root.form-factor-index == 0 ? "Curved shoulders join the display edge. Expanded corners stay softly rounded." : "A floating capsule with adjustable distance from the display edge."; }
+                        FieldRow { FieldLabel { text: "Island size (%)"; } SpinBox { accessible-label: "Island size percentage"; minimum: 75; maximum: 150; step-size: 5; value <=> root.island-scale-percent; edited => { root.changed(); } }
+                        }
+                        Note { text: "Scales the notch or island, text, and controls together."; }
+                        FieldRow { FieldLabel { text: "Text size (%)"; } SpinBox { accessible-label: "Text size percentage"; minimum: 80; maximum: 140; step-size: 5; value <=> root.text-scale-percent; edited => { root.changed(); } } }
+                        Note { text: "Text size changes typography only. Layout dimensions and overall zoom are independent."; }
+                        HorizontalLayout { spacing: 12px;
+                            ComboBox { accessible-label: "Layout preset"; model: ["Balanced", "Roomy", "Larger text"]; current-index <=> root.layout-preset; horizontal-stretch: 1; }
+                            Button { text: "Apply preset"; clicked => { root.apply-layout-preset(root.layout-preset); } }
+                        }
+                        Note { text: "Presets change dimensions, text size and zoom. Your material, startup and other preferences stay unchanged."; }
+                        CheckBox { text: "Advanced shape dimensions and corners"; checked <=> root.advanced-appearance; }
+                        if root.advanced-appearance : VerticalLayout {
+                            spacing: 12px;
+                        Heading { text: "Contracted size"; }
+                        FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Contracted width"; minimum: 100; maximum: 320; value <=> root.contracted-width; edited => { root.changed(); } } }
+                        FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Contracted height"; minimum: 28; maximum: 64; value <=> root.contracted-height; edited => { root.changed(); } } }
+                        Heading { text: "Expanded size"; }
+                        FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Expanded width"; minimum: 320; maximum: 900; value <=> root.expanded-width; edited => { root.changed(); } } }
+                        FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Expanded height"; minimum: 160; maximum: 360; value <=> root.expanded-height; edited => { root.changed(); } } }
+                        Heading { text: "Media size"; }
+                        FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Media width"; minimum: 480; maximum: 1000; value <=> root.media-width; edited => { root.changed(); } } }
+                        FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Media height"; minimum: 216; maximum: 400; value <=> root.media-height; edited => { root.changed(); } } }
+                        Note { text: "Width and height reshape the island without changing text size. Island size (%) separately controls overall zoom."; }
+                        FieldRow { FieldLabel { text: "Expanded notch corners (pixels)"; } SpinBox { accessible-label: "Expanded notch corner radius in logical pixels"; enabled: root.form-factor-index == 0; minimum: 0; maximum: 24; value <=> root.notch-corner-radius; edited => { root.changed(); } }
+                        }
+                        FieldRow { FieldLabel { text: "Contracted notch corners (pixels)"; } SpinBox { accessible-label: "Contracted notch corner radius in logical pixels"; enabled: root.form-factor-index == 0; minimum: 0; maximum: 24; value <=> root.notch-contracted-radius; edited => { root.changed(); } }
+                        }
+                        Note { text: "Contracted corners apply to the idle and compact notch, capped at half its height. Both notch radii default to 8 pixels."; }
+                        }
                         Heading { text: "Material"; }
                         ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
                         Note { text: root.appearance-index == 4 ? "Live glass follows the desktop. It uses more graphics resources than Eco glass." : root.appearance-index == 3 ? "Eco glass refreshes its backdrop on interaction and display changes." : "Use transparency and tint to balance lightness with readable controls."; }
                         HorizontalLayout {
-                            Label { text: "Tint strength"; }
-                            Text { text: round(root.tint * 100) + "%"; color: #bcbcc7; horizontal-alignment: right; }
+                            spacing: 12px;
+                            Label { text: "Transparency / black tint"; }
+                            Text { text: round(root.tint * 100) + "%"; color: #bcbcc7; horizontal-stretch: 1; horizontal-alignment: right; vertical-alignment: center; }
                         }
-                        Slider { accessible-label: "Tint strength"; minimum: 0.1; maximum: 0.95; value <=> root.tint; changed => { root.changed(); } }
+                        Slider { accessible-label: "Tint strength"; minimum: 0.15; maximum: 0.95; value <=> root.tint; changed => { root.changed(); } }
                         Rule {}
                         Heading { text: "Motion"; }
                         CheckBox { text: "Enable animations"; checked <=> root.animations-enabled; toggled => { root.changed(); } }
                         CheckBox { text: "Respect Windows reduced motion"; checked <=> root.follow-reduced-motion; toggled => { root.changed(); } }
+                        FieldRow { FieldLabel { text: "Animation speed (%)"; } SpinBox { accessible-label: "Animation speed percentage"; enabled: root.animations-enabled; minimum: 50; maximum: 200; step-size: 10; value <=> root.animation-speed-percent; edited => { root.changed(); } }
+                        }
+                        Note { text: "100% is normal. Lower values slow motion; higher values speed it up. Hover delays and countdown timing stay independent."; }
                         Label { text: "Spring character"; }
                         ComboBox { accessible-label: "Spring character"; enabled: root.animations-enabled; model: ["Calm", "Balanced", "Bouncy"]; current-index <=> root.bounce-index; selected => { root.changed(); } }
                         Button { text: "Preview motion"; enabled: root.animations-enabled; clicked => { root.preview-motion(); } }
                         Note { text: "Retargeting preserves momentum, including when you reverse a transition."; }
                     }
                 }
-                if root.page == 1 : ScrollView {
+                }
+                Tab { title: "Notifications";
+                    ScrollView {
                     x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    VerticalLayout {
-                        padding-right: 14px; spacing: 13px;
+                    PageLayout {
                         Heading { text: "Notification previews"; }
                         Note { text: root.notification-access; }
                         HorizontalLayout {
+                            spacing: 12px;
                             Button { text: "Enable access…"; enabled: root.notification-access-requestable; clicked => { root.enable-notifications(); } }
                             Button { text: "Retry access"; enabled: root.notification-access-requestable; clicked => { root.retry-notifications(); } }
                         }
@@ -101,9 +202,7 @@ export component SettingsWindow inherits Window {
                         Label { text: "Preview privacy"; }
                         ComboBox { accessible-label: "Notification privacy"; model: ["Title only", "App identity only", "Body in expanded preview"]; current-index <=> root.privacy-index; selected => { root.changed(); } }
                         Note { text: "Compact previews never show message bodies. Hide preview removes the island preview, not the Windows notification."; }
-                        HorizontalLayout {
-                            Label { text: "Compact preview duration (seconds)"; }
-                            SpinBox { accessible-label: "Notification duration in seconds"; minimum: 2; maximum: 30; value <=> root.notification-duration; edited => { root.changed(); } }
+                        FieldRow { FieldLabel { text: "Compact preview duration (seconds)"; } SpinBox { accessible-label: "Notification duration in seconds"; minimum: 3; maximum: 10; value <=> root.notification-duration; edited => { root.changed(); } }
                         }
                         Rule {}
                         Heading { text: "Apps"; }
@@ -115,50 +214,80 @@ export component SettingsWindow inherits Window {
                         }
                     }
                 }
-                if root.page == 2 : ScrollView {
+                }
+                Tab { title: "Behavior";
+                    ScrollView {
                     x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    VerticalLayout {
-                        padding-right: 14px; spacing: 15px;
+                    PageLayout {
+                        Heading { text: "Windows startup"; }
+                        CheckBox { text: "Start Still Island when I sign in"; enabled: root.startup-available; checked <=> root.launch-at-startup; toggled => { root.changed(); } }
+                        Note { text: root.startup-status; }
+                        Rule {}
                         Heading { text: "Automatic activity"; }
                         CheckBox { text: "Show system volume changes"; checked <=> root.auto-volume; toggled => { root.changed(); } }
                         Note { text: "Volume feedback stays small while you are using an open panel."; }
+                        CheckBox { text: "Show battery previews"; checked <=> root.battery-previews; toggled => { root.changed(); } }
+                        Note { text: "Quiet previews for charging changes and low battery. No previews appear on PCs without a system battery."; }
                         CheckBox { text: "Show compact Now Playing"; checked <=> root.compact-now-playing; toggled => { root.changed(); } }
+                        CheckBox { text: "Look up lyrics online"; checked <=> root.online-lyrics; toggled => { root.changed(); } }
+                        Note { text: "When the media panel opens, send track title, artist, album and duration to LRCLIB to find lyrics. No audio is recorded or sent."; }
                         Rule {}
                         Heading { text: "Interaction"; }
                         CheckBox { text: "Expand on hover"; checked <=> root.hover-expand; toggled => { root.changed(); } }
-                        HorizontalLayout {
-                            Label { text: "Hover delay (milliseconds)"; }
-                            SpinBox { accessible-label: "Hover delay in milliseconds"; minimum: 150; maximum: 2000; step-size: 50; value <=> root.hover-delay; enabled: root.hover-expand; edited => { root.changed(); } }
+                        FieldRow { FieldLabel { text: "Hover delay (milliseconds)"; } SpinBox { accessible-label: "Hover delay in milliseconds"; minimum: 200; maximum: 2000; step-size: 50; value <=> root.hover-delay; enabled: root.hover-expand; edited => { root.changed(); } }
                         }
+                        Note { text: "Pause the pointer to expand. Moving across the island resets the hover delay. Pin a panel to keep it open."; }
+                        FieldRow { FieldLabel { text: "Collapse delay (milliseconds)"; } SpinBox { accessible-label: "Collapse delay in milliseconds"; minimum: 0; maximum: 2000; step-size: 50; value <=> root.collapse-delay; edited => { root.changed(); } }
+                        }
+                        CheckBox { text: "Scroll compact notch or volume controls to adjust volume"; checked <=> root.scroll-volume; toggled => { root.changed(); } }
+                        Note { text: "Scroll elsewhere in the expanded notch to switch pages. Lyrics and long integration views scroll normally. The selected page stays compact when you leave."; }
+                        FieldRow { FieldLabel { text: "Volume change per wheel notch (%)"; } SpinBox { accessible-label: "Volume step percent"; minimum: 1; maximum: 10; value <=> root.volume-step; enabled: root.scroll-volume; edited => { root.changed(); } }
+                        }
+                        CheckBox { text: "Middle-click island to mute / unmute"; checked <=> root.middle-mute; toggled => { root.changed(); } }
                         CheckBox { text: "Collapse on outside click"; checked <=> root.outside-click; toggled => { root.changed(); } }
-                        CheckBox { text: "Enable Ctrl + Alt + I shortcut"; checked <=> root.shortcut-enabled; toggled => { root.changed(); } }
-                        Note { text: "Escape closes an active island panel or this settings window. The overlay does not take keyboard focus from your app."; }
+                        CheckBox { text: "Enable Ctrl + Alt + Space shortcut"; checked <=> root.shortcut-enabled; toggled => { root.changed(); } }
+                        CheckBox { text: "Enable application launcher shortcut"; checked <=> root.launcher-enabled; toggled => { root.changed(); } }
+                        ComboBox { model: ["Alt + Space", "Ctrl + Space", "Alt + Shift + Space"]; current-index <=> root.launcher-shortcut; enabled: root.launcher-enabled; selected(_) => { root.changed(); } }
+                        Button { text: "Clear recent launches"; clicked => { root.clear-launcher-history(); } }
+                        Note { text: "Launcher mode receives keyboard focus for search. Enter launches, arrows select, Escape closes. Ordinary island panels stay nonactivating. Shortcut conflicts are reported here."; }
                         Rule {}
                         CheckBox { text: "Hide over fullscreen apps"; checked <=> root.fullscreen-hide; toggled => { root.changed(); } }
+                        Heading { text: "Per-app fullscreen rules"; }
+                        Note { text: "Automatic is the default. Enter executable names separated by commas, for example game.exe, player.exe. Always hide also applies while windowed; it wins if a name appears in both lists."; }
+                        Label { text: "Always hide over these apps"; }
+                        LineEdit { accessible-label: "Always hide over executables"; text <=> root.fullscreen-always-hide-text; placeholder-text: "game.exe, player.exe"; accepted => { root.changed(); } }
+                        Label { text: "Always show over these apps"; }
+                        LineEdit { accessible-label: "Always show over executables"; text <=> root.fullscreen-always-show-text; placeholder-text: "editor.exe"; accepted => { root.changed(); } }
+                        Button { text: "Apply app rules"; clicked => { root.changed(); } }
+                        Note { text: "Clear a name to return that app to automatic detection. The .exe extension may be omitted; paths and wildcard patterns are not used. Lock-screen hiding is always respected."; }
+
                     }
                 }
-                if root.page == 3 : ScrollView {
+                }
+                Tab { title: "Display";
+                    ScrollView {
                     x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    VerticalLayout {
-                        padding-right: 14px; spacing: 15px;
+                    PageLayout {
                         Heading { text: "Placement"; }
                         Label { text: "Display"; }
                         ComboBox { accessible-label: "Overlay display"; model: root.monitor-names; current-index <=> root.monitor-index; selected => { root.changed(); } }
                         Note { text: "Primary display follows the primary monitor when your display configuration changes."; }
-                        HorizontalLayout {
-                            Label { text: "Top offset (logical pixels)"; }
-                            SpinBox { accessible-label: "Top offset in logical pixels"; minimum: 0; maximum: 80; value <=> root.top-offset; edited => { root.changed(); } }
+                        FieldRow { FieldLabel { text: "Top offset (logical pixels)"; } SpinBox { accessible-label: "Top offset in logical pixels"; enabled: root.form-factor-index == 1; minimum: 0; maximum: 80; value <=> root.top-offset; edited => { root.changed(); } }
                         }
+                        if root.form-factor-index == 0 : Note { text: "Notch attaches flush to the top edge. Your Island offset is retained."; }
                         CheckBox { text: "Always on top"; checked <=> root.island-always-on-top; toggled => { root.changed(); } }
                         Rule {}
                         Heading { text: "A little breathing room"; }
                         Note { text: "The island stays centered on the chosen display. Empty space around its current shape remains available to the desktop."; }
                     }
                 }
+                }
             }
             Rule {}
             Note { text: root.status-text == "" ? "Saved locally on this PC." : root.status-text; }
             HorizontalLayout {
+                            spacing: 12px;
+                Button { text: "Plugins…"; clicked => { root.manage-plugins(); } }
                 Button { text: "Reset defaults"; clicked => { root.reset-defaults(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Button { text: "Done"; primary: true; clicked => { root.close-settings(); } }

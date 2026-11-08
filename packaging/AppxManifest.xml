@@ -2,8 +2,9 @@
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap uap3 rescap">
+         IgnorableNamespaces="uap uap3 desktop rescap">
   <Identity Name="StillIsland.Desktop" Publisher="CN=StillIslandDevelopment"
             Version="0.2.0.0" ProcessorArchitecture="x64" />
   <Properties>
@@ -21,6 +22,12 @@
       <uap:VisualElements DisplayName="Still Island" Description="A quiet native desktop island."
                           Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png" BackgroundColor="transparent" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="still-island.exe"
+                           EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="StillIslandStartup" Enabled="false" DisplayName="Still Island" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities>

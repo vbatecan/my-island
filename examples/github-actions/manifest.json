@@ -1,0 +1,51 @@
+{
+  "id": "org.stillisland.github-actions",
+  "name": "GitHub Actions",
+  "version": "0.1.0",
+  "api_version": 1,
+  "entrypoint": "still-island-plugin-github.exe",
+  "background": true,
+  "capabilities": [
+    "native_ui",
+    "activities",
+    "network:api.github.com",
+    "open_uri:https"
+  ],
+  "actions": [
+    {
+      "id": "refresh",
+      "label": "Refresh"
+    },
+    {
+      "id": "open",
+      "label": "Open latest run"
+    }
+  ],
+  "views": [
+    {
+      "id": "main",
+      "label": "Overview"
+    }
+  ],
+  "config": [
+    {
+      "id": "repository",
+      "label": "Repository (owner/name)",
+      "kind": "string",
+      "default": ""
+    },
+    {
+      "id": "token",
+      "label": "Read-only GitHub token",
+      "kind": "secret",
+      "default": ""
+    },
+    {
+      "id": "monitor",
+      "label": "Background monitoring",
+      "kind": "bool",
+      "default": false
+    }
+  ],
+  "assets": []
+}

@@ -35,7 +35,16 @@ pub fn snapshot(ui: &crate::IslandWindow, name: &str) -> Result<PathBuf, Box<dyn
             .into());
         }
     }
-    let scale = width as f64 / 420.0;
+    let scale = width as f64 / f64::from(ui.get_canvas_width());
+    let expected_canvas_height = f64::from(ui.get_canvas_height()) * scale;
+    if (f64::from(height) - expected_canvas_height).abs() > 2. {
+        return Err(format!(
+            "{name}: canvas is {width}x{height}; expected logical {}x{} at scale {scale:.3}",
+            ui.get_canvas_width(),
+            ui.get_canvas_height()
+        )
+        .into());
+    }
     let interior = pixel(width / 2, (3.0 * scale).round() as u32);
     if ui.get_appearance() == 0
         && (interior.a < 250 || interior.r > 3 || interior.g > 3 || interior.b > 3)
@@ -61,7 +70,7 @@ pub fn snapshot(ui: &crate::IslandWindow, name: &str) -> Result<PathBuf, Box<dyn
             }
         }
     }
-    let expected_width = f64::from(ui.get_shape_width()) * scale;
+    let expected_width = f64::from(ui.get_shape_width() + 2. * ui.get_shoulder()) * scale;
     let expected_height = f64::from(ui.get_shape_height()) * scale;
     let actual_width = bounds.2 + 1 - bounds.0;
     let actual_height = bounds.3 + 1 - bounds.1;

@@ -1,0 +1,84 @@
+// Seven stable modulo slots keep visible text attached to its absolute line while
+// one continuous cursor moves it through the viewport. The host rebases on seeks.
+export struct LyricRow { text: string, line-index: int }
+
+export component AnimatedLyrics inherits Rectangle {
+    in property <float> ui-scale: 1;
+    in property <float> text-scale: 1;
+    private property <length> scaled-pixel: 1px * root.ui-scale;
+    in property <float> motion-speed: 1;
+    out property <float> font-pixels: 18 * root.ui-scale * root.text-scale;
+    in property <[LyricRow]> rows;
+    in property <bool> motion-enabled: true;
+    out property <float> cursor: -1;
+    out property <bool> motion-active: abs(root.cursor - root.destination) > 0.001;
+    private property <float> destination: -1;
+    private property <bool> step-animated: false;
+    // A stable pitch survives retargeting and seeking. Reserve two wrapped lines
+    // at the largest requested text size; neighboring lines occupy smaller rows.
+    private property <length> focused-height: max(52, 44 * root.text-scale + 8) * root.scaled-pixel;
+    private property <length> context-height: max(32, 32 * root.text-scale) * root.scaled-pixel;
+    private property <length> line-pitch: (root.focused-height + root.context-height) / 2 + 6 * root.scaled-pixel;
+    out property <bool> gap-active: root.rows.length > 0 && root.focused-text == "";
+    in property <string> focused-text;
+    clip: true;
+
+    public function move-to(next: float, animated: bool) {
+        root.destination = next;
+        root.step-animated = animated;
+        root.cursor = next;
+    }
+    public function stop() {
+        root.step-animated = false;
+        root.cursor = root.destination;
+    }
+    // Rasterize at the actual requested size rather than stretching a text layer.
+    // Quarter-pixel base steps bound the retained glyph variants to 21 sizes
+    // per zoom/DPI, while following the same continuous cursor as row movement.
+    public pure function font-size-for-line(index: float) -> float {
+        let emphasis = max(0, 1 - abs(index - root.cursor));
+        return round((13 + 5 * emphasis) * 4) / 4 * root.ui-scale * root.text-scale;
+    }
+    changed motion-enabled => { if !self.motion-enabled { self.stop(); } }
+    changed visible => { if !self.visible { self.stop(); } }
+    animate cursor {
+        duration: root.motion-enabled && root.step-animated ? 300ms / min(2, max(0.5, root.motion-speed)) : 0ms;
+        easing: cubic-bezier(0.2, 0.0, 0.2, 1.0);
+    }
+
+    Text {
+        text: root.destination < 0 ? "Waiting for vocals" : "Instrumental break";
+        visible: root.gap-active;
+        color: #90909b;
+        font-size: 12 * root.scaled-pixel * root.text-scale;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        opacity: max(0, 1 - abs(root.cursor - root.destination));
+    }
+    for line in root.rows : Rectangle {
+        private property <float> distance: abs(line.line-index - root.cursor);
+        private property <float> emphasis: max(0, 1 - self.distance);
+        x: 0px;
+        y: parent.height / 2 - self.height / 2 + (line.line-index - root.cursor) * root.line-pitch;
+        width: parent.width;
+        height: root.context-height + (root.focused-height - root.context-height) * self.emphasis;
+        opacity: min(1, max(0, (1.7 - self.distance) / 0.6)) * (0.48 + 0.52 * self.emphasis);
+        clip: true;
+        // Center short phrases, but preserve the beginning of an overlong verse.
+        // Centering the full wrapped text block can otherwise move its first
+        // lines above the row. The row itself also clips independently of peers.
+        Text {
+            x: 0px;
+            y: max(0px, (parent.height - self.preferred-height) / 2);
+            width: parent.width;
+            height: parent.height - self.y;
+            text: line.text;
+            color: white;
+            font-size: root.font-size-for-line(line.line-index) * 1px;
+            font-weight: 500;
+            wrap: word-wrap;
+            overflow: elide;
+            vertical-alignment: top;
+        }
+    }
+}

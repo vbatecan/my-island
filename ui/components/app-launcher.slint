@@ -1,0 +1,222 @@
+export struct LauncherResult {
+    id: string,
+    title: string,
+    detail: string,
+    icon: image,
+    has-icon: bool,
+}
+
+// The host owns discovery, selection and ranking. This view never launches or
+// searches on its own; it renders at most six results supplied by the host.
+export component AppLauncher inherits Rectangle {
+    in property <[LauncherResult]> results;
+    in property <bool> busy: false;
+    in property <string> status-text;
+    in property <int> selected-index: 0;
+    in property <length> font-pixel: 1px;
+    in property <length> layout-pixel: 1px;
+    in-out property <string> query;
+    callback query-edited(string);
+    callback activate(int);
+    callback navigate(int);
+    callback dismiss();
+    public function focus-search() { search.focus(); }
+    private property <length> row-height: min(46 * root.layout-pixel, max(36 * root.layout-pixel, (root.height - 112 * root.layout-pixel) / 6));
+    private property <length> title-height: max(18 * root.layout-pixel, 15 * root.font-pixel);
+    private property <length> detail-height: max(13 * root.layout-pixel, 11 * root.font-pixel);
+    private property <length> result-text-height: root.title-height + root.detail-height;
+    background: transparent;
+    clip: true;
+    forward-focus: search;
+    changed visible => { if self.visible { search.focus(); } }
+
+    // Blank space belongs to the search panel too. Without this surface, a
+    // click in a row gap bubbles to the island's click-to-collapse gesture.
+    TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        clicked => { search.focus(); }
+    }
+
+    search-box := Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 48 * root.layout-pixel;
+        border-radius: 8 * root.layout-pixel;
+        background: #ffffff0d;
+        border-width: 1px;
+        border-color: search.has-focus ? #ffffff25 : #ffffff10;
+        Text {
+            x: 14 * root.layout-pixel;
+            y: 0px;
+            width: 22 * root.layout-pixel;
+            height: parent.height;
+            text: "\u{E721}";
+            font-family: "Segoe Fluent Icons";
+            font-size: 17 * root.font-pixel;
+            color: #b5b5bd;
+            vertical-alignment: center;
+        }
+        if root.query == "" : Text {
+            x: 46 * root.layout-pixel;
+            y: 0px;
+            width: parent.width - self.x - 14 * root.layout-pixel;
+            height: parent.height;
+            text: "Search applications";
+            font-size: 16 * root.font-pixel;
+            color: #71717b;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        search := TextInput {
+            x: 46 * root.layout-pixel;
+            y: 0px;
+            width: parent.width - self.x - 14 * root.layout-pixel;
+            height: parent.height;
+            text <=> root.query;
+            single-line: true;
+            font-size: 16 * root.font-pixel;
+            color: #f5f5f7;
+            selection-background-color: #454552;
+            selection-foreground-color: white;
+            vertical-alignment: center;
+            accessible-label: "Search installed applications";
+            edited => { root.query-edited(self.text); }
+            accepted => { root.activate(root.selected-index); }
+            key-pressed(event) => {
+                if event.text == Key.UpArrow { root.navigate(-1); return accept; }
+                if event.text == Key.DownArrow { root.navigate(1); return accept; }
+                if event.text == Key.Escape { root.dismiss(); return accept; }
+                return reject;
+            }
+        }
+    }
+
+    Text {
+        x: 0px;
+        y: 59 * root.layout-pixel;
+        height: 15 * root.layout-pixel;
+        width: parent.width;
+        text: root.busy ? "FINDING APPLICATIONS" : root.query == "" ? "RECENT & SUGGESTED" : "APPLICATIONS";
+        color: #7c7c87;
+        font-size: 9 * root.font-pixel;
+        font-weight: 600;
+        letter-spacing: 0.8 * root.font-pixel;
+        overflow: elide;
+    }
+
+    for item[index] in root.results : Rectangle {
+        x: 0px;
+        y: 80 * root.layout-pixel + index * root.row-height;
+        width: parent.width;
+        height: root.row-height - 2 * root.layout-pixel;
+        visible: index < 6;
+        border-radius: 6 * root.layout-pixel;
+        background: root.selected-index == index ? #ffffff16 : row-pointer.has-hover ? #ffffff0c : transparent;
+        clip: true;
+        accessible-role: button;
+        accessible-label: item.title;
+        accessible-action-default => { root.activate(index); }
+        if item.has-icon : Image {
+            x: 8 * root.layout-pixel;
+            y: (parent.height - self.height) / 2;
+            width: 32 * root.layout-pixel;
+            height: self.width;
+            source: item.icon;
+            image-fit: contain;
+        }
+        if !item.has-icon : Text {
+            x: 8 * root.layout-pixel;
+            y: (parent.height - self.height) / 2;
+            width: 32 * root.layout-pixel;
+            height: self.width;
+            text: "\u{ECAA}";
+            font-family: "Segoe Fluent Icons";
+            font-size: 23 * root.font-pixel;
+            color: #9999a5;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            x: 52 * root.layout-pixel;
+            y: item.detail == "" ? 0px : max(0px, (parent.height - root.result-text-height) / 2);
+            width: parent.width - self.x - 50 * root.layout-pixel;
+            height: item.detail == "" ? parent.height : root.title-height;
+            text: item.title;
+            color: #efeff3;
+            font-size: 12 * root.font-pixel;
+            font-weight: 500;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if item.detail != "" : Text {
+            x: 52 * root.layout-pixel;
+            y: max(0px, (parent.height - root.result-text-height) / 2) + root.title-height;
+            width: parent.width - self.x - 50 * root.layout-pixel;
+            height: root.detail-height;
+            text: item.detail;
+            color: #84848e;
+            font-size: 9 * root.font-pixel;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.selected-index == index : Text {
+            x: parent.width - 44 * root.layout-pixel;
+            y: 0px;
+            width: 36 * root.layout-pixel;
+            height: parent.height;
+            text: "Enter";
+            color: #9a9aa5;
+            font-size: 9 * root.font-pixel;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        row-pointer := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.activate(index); }
+        }
+    }
+
+    if root.results.length == 0 : Text {
+        x: 12 * root.layout-pixel;
+        y: 104 * root.layout-pixel;
+        width: parent.width - 24 * root.layout-pixel;
+        height: max(0px, parent.height - 156 * root.layout-pixel);
+        text: root.status-text != "" ? root.status-text : root.busy ? "Preparing your applications…" : "No applications found";
+        color: #a1a1ad;
+        font-size: 12 * root.font-pixel;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+
+    Rectangle {
+        x: 0px;
+        y: parent.height - 27 * root.layout-pixel;
+        height: 1px;
+        width: parent.width;
+        background: #ffffff12;
+    }
+    Text {
+        x: 0px;
+        y: parent.height - 21 * root.layout-pixel;
+        height: 17 * root.layout-pixel;
+        width: max(0px, parent.width - 90 * root.layout-pixel);
+        text: root.results.length > 0 && root.status-text != "" ? root.status-text : "↑ ↓  Navigate     Enter  Open";
+        font-size: 9 * root.font-pixel;
+        color: #72727d;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: parent.width - 76 * root.layout-pixel;
+        y: parent.height - 21 * root.layout-pixel;
+        height: 17 * root.layout-pixel;
+        width: 76 * root.layout-pixel;
+        text: "Esc  Close";
+        font-size: 9 * root.font-pixel;
+        color: #92929d;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
