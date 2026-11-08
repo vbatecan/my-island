@@ -7,12 +7,20 @@ export struct LauncherResult {
 }
 
 // The host owns discovery, selection and ranking. This view never launches or
-// searches on its own; it renders at most six results supplied by the host.
+// searches on its own; it renders six results, or an answer and four results.
 export component AppLauncher inherits Rectangle {
     in property <[LauncherResult]> results;
     in property <bool> busy: false;
     in property <string> status-text;
     in property <int> selected-index: 0;
+    in property <bool> answer-editing: false;
+    in property <bool> answer-visible: false;
+    in property <string> answer-value;
+    in property <string> answer-detail;
+    in property <bool> answer-busy: false;
+    in property <bool> answer-error: false;
+    in property <bool> animations-enabled: true;
+    in property <float> animation-speed: 1;
     in property <length> font-pixel: 1px;
     in property <length> layout-pixel: 1px;
     in-out property <string> query;
@@ -21,7 +29,9 @@ export component AppLauncher inherits Rectangle {
     callback navigate(int);
     callback dismiss();
     public function focus-search() { search.focus(); }
-    private property <length> row-height: min(46 * root.layout-pixel, max(36 * root.layout-pixel, (root.height - 112 * root.layout-pixel) / 6));
+    private property <length> row-height: min(46 * root.layout-pixel, max(32 * root.layout-pixel, (root.height - (root.answer-visible ? 212 : 112) * root.layout-pixel) / (root.answer-visible ? 4 : 6)));
+    private property <float> answer-reveal: root.answer-visible ? 1 : 0;
+    animate answer-reveal { duration: root.animations-enabled ? 140ms / min(2, max(0.5, root.animation-speed)) : 0ms; easing: ease-out; }
     private property <length> title-height: max(18 * root.layout-pixel, 15 * root.font-pixel);
     private property <length> detail-height: max(13 * root.layout-pixel, 11 * root.font-pixel);
     private property <length> result-text-height: root.title-height + root.detail-height;
@@ -62,7 +72,7 @@ export component AppLauncher inherits Rectangle {
             y: 0px;
             width: parent.width - self.x - 14 * root.layout-pixel;
             height: parent.height;
-            text: "Search applications";
+            text: "Search apps, settings, or calculate";
             font-size: 16 * root.font-pixel;
             color: #71717b;
             vertical-alignment: center;
@@ -80,7 +90,7 @@ export component AppLauncher inherits Rectangle {
             selection-background-color: #454552;
             selection-foreground-color: white;
             vertical-alignment: center;
-            accessible-label: "Search installed applications";
+            accessible-label: "Search applications, Windows actions, or calculate";
             edited => { root.query-edited(self.text); }
             accepted => { root.activate(root.selected-index); }
             key-pressed(event) => {
@@ -97,7 +107,8 @@ export component AppLauncher inherits Rectangle {
         y: 59 * root.layout-pixel;
         height: 15 * root.layout-pixel;
         width: parent.width;
-        text: root.busy ? "FINDING APPLICATIONS" : root.query == "" ? "RECENT & SUGGESTED" : "APPLICATIONS";
+        visible: !root.answer-editing || root.answer-visible;
+        text: root.answer-visible ? "ANSWER" : root.busy ? "FINDING APPLICATIONS" : root.query == "" ? "RECENT & SUGGESTED" : "APPLICATIONS & ACTIONS";
         color: #7c7c87;
         font-size: 9 * root.font-pixel;
         font-weight: 600;
@@ -105,12 +116,54 @@ export component AppLauncher inherits Rectangle {
         overflow: elide;
     }
 
+    answer-card := Rectangle {
+        x: 0px;
+        y: (76 + 5 * (1 - root.answer-reveal)) * root.layout-pixel;
+        width: parent.width;
+        height: 92 * root.layout-pixel;
+        visible: root.answer-reveal > 0.001;
+        opacity: root.answer-reveal;
+        border-radius: 8 * root.layout-pixel;
+        border-width: 1px;
+        border-color: root.selected-index == -1 ? #ffffff30 : #ffffff12;
+        background: root.selected-index == -1 ? #ffffff13 : #ffffff09;
+        clip: true;
+        Text {
+            x: 14 * root.layout-pixel;
+            y: 10 * root.layout-pixel;
+            width: parent.width - 28 * root.layout-pixel;
+            height: 40 * root.layout-pixel;
+            text: root.answer-busy ? "" : root.answer-error ? "Result unavailable" : root.answer-value;
+            color: root.answer-error ? #b5b5c0 : #f5f5f7;
+            font-size: (root.answer-busy || root.answer-error ? 15 : 25) * root.font-pixel;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            x: 14 * root.layout-pixel;
+            y: 53 * root.layout-pixel;
+            width: parent.width - 28 * root.layout-pixel;
+            height: 29 * root.layout-pixel;
+            text: root.answer-detail;
+            color: #9999a5;
+            font-size: 10 * root.font-pixel;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        TouchArea {
+            enabled: root.answer-visible && !root.answer-busy && !root.answer-error;
+            mouse-cursor: pointer;
+            clicked => { root.activate(-1); }
+        }
+    }
+
     for item[index] in root.results : Rectangle {
         x: 0px;
-        y: 80 * root.layout-pixel + index * root.row-height;
+        y: (root.answer-visible ? 180 : 80) * root.layout-pixel + index * root.row-height;
         width: parent.width;
         height: root.row-height - 2 * root.layout-pixel;
-        visible: index < 6;
+        visible: index < (root.answer-visible ? 4 : 6);
         border-radius: 6 * root.layout-pixel;
         background: root.selected-index == index ? #ffffff16 : row-pointer.has-hover ? #ffffff0c : transparent;
         clip: true;
@@ -130,7 +183,7 @@ export component AppLauncher inherits Rectangle {
             y: (parent.height - self.height) / 2;
             width: 32 * root.layout-pixel;
             height: self.width;
-            text: "\u{ECAA}";
+            text: item.detail == "Windows Settings" || item.detail == "Windows system tool" ? "\u{E713}" : "\u{ECAA}";
             font-family: "Segoe Fluent Icons";
             font-size: 23 * root.font-pixel;
             color: #9999a5;
@@ -177,7 +230,7 @@ export component AppLauncher inherits Rectangle {
         }
     }
 
-    if root.results.length == 0 : Text {
+    if root.results.length == 0 && !root.answer-visible && !root.answer-editing : Text {
         x: 12 * root.layout-pixel;
         y: 104 * root.layout-pixel;
         width: parent.width - 24 * root.layout-pixel;
@@ -190,33 +243,15 @@ export component AppLauncher inherits Rectangle {
         wrap: word-wrap;
     }
 
-    Rectangle {
+    if root.status-text != "" : Text {
         x: 0px;
-        y: parent.height - 27 * root.layout-pixel;
-        height: 1px;
+        y: parent.height - 21 * root.layout-pixel;
+        height: 17 * root.layout-pixel;
         width: parent.width;
-        background: #ffffff12;
-    }
-    Text {
-        x: 0px;
-        y: parent.height - 21 * root.layout-pixel;
-        height: 17 * root.layout-pixel;
-        width: max(0px, parent.width - 90 * root.layout-pixel);
-        text: root.results.length > 0 && root.status-text != "" ? root.status-text : "↑ ↓  Navigate     Enter  Open";
-        font-size: 9 * root.font-pixel;
-        color: #72727d;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-    Text {
-        x: parent.width - 76 * root.layout-pixel;
-        y: parent.height - 21 * root.layout-pixel;
-        height: 17 * root.layout-pixel;
-        width: 76 * root.layout-pixel;
-        text: "Esc  Close";
+        text: root.status-text;
         font-size: 9 * root.font-pixel;
         color: #92929d;
-        horizontal-alignment: right;
         vertical-alignment: center;
+        overflow: elide;
     }
 }

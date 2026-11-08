@@ -222,7 +222,18 @@ pub fn search(
             let score = if query.is_empty() {
                 (0, 0)
             } else {
-                match_score(&name, &query)?
+                let name_score = match_score(&name, &query)
+                    .map(|(tier, cost)| (if tier >= 2 { tier + 1 } else { tier }, cost));
+                let keyword_score = app
+                    .keywords
+                    .iter()
+                    .filter_map(|keyword| {
+                        let keyword = normalized(keyword, 512);
+                        match_score(&keyword, &query)
+                            .map(|(tier, cost)| (if tier < 4 { 2 } else { 5 }, cost))
+                    })
+                    .min();
+                name_score.into_iter().chain(keyword_score).min()?
             };
             Some((score, recent, name, app.id.as_str(), index))
         })
@@ -246,6 +257,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             detail: "Test fixture".into(),
+            keywords: vec![],
             target: LaunchTarget::Shortcut(PathBuf::from("unused.lnk")),
         }
     }
@@ -262,6 +274,27 @@ mod tests {
             search(&apps, "code", &RecentLaunches::default(), 10),
             vec![4, 3, 2, 1, 0]
         );
+    }
+    #[test]
+    fn windows_keywords_follow_name_prefixes_before_fuzzy_matches() {
+        let mut action = app("windows:installed-apps", "Installed apps");
+        action.keywords = vec!["add or remove programs".into(), "uninstall apps".into()];
+        let apps = vec![
+            app("prefix", "Uninstall apps helper"),
+            action,
+            app("exact", "Uninstall apps"),
+        ];
+        assert_eq!(
+            search(&apps, "uninstall apps", &RecentLaunches::default(), 6),
+            vec![2, 0, 1]
+        );
+        assert_eq!(
+            search(&apps, "add or remove", &RecentLaunches::default(), 6),
+            vec![1]
+        );
+        let mut history = RecentLaunches::default();
+        history.record("windows:installed-apps");
+        assert_eq!(search(&apps, "", &history, 6)[0], 1);
     }
     #[test]
     fn matching_is_case_insensitive_unicode_and_whitespace_aware() {

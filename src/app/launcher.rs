@@ -5,6 +5,7 @@ use crate::platform::launcher::{AppEntry, IconPixels, LaunchTarget};
 use std::collections::{HashMap, VecDeque};
 
 enum Update {
+    Answer(u64, Result<Option<crate::launcher_answers::Answer>, String>),
     Failed(&'static str, String),
     Catalog(Result<platform::launcher::Catalog, String>),
     Icons(Vec<((String, u32), Option<IconPixels>)>),
@@ -13,6 +14,13 @@ enum Update {
 #[derive(Default)]
 pub(super) struct Controller {
     pub open: bool,
+    pub(super) focus_epoch: u64,
+    generation: u64,
+    answer_cancel: Arc<AtomicBool>,
+    answer_timer: slint::Timer,
+    answer_running: bool,
+    answer_pair: Option<String>,
+    answer_pending: Option<String>,
     entries: Vec<AppEntry>,
     results: Vec<usize>,
     recent: RecentLaunches,
@@ -56,7 +64,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let weak = Rc::downgrade(app);
     ui.on_launcher_query(move |_| {
         if let Some(app) = weak.upgrade() {
-            refresh(&app);
+            query_changed(&app);
         }
     });
     let weak = Rc::downgrade(app);
@@ -65,9 +73,11 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
             let a = app.borrow();
             if let Some(ui) = a.ui.upgrade() {
                 let count = a.launcher.results.len() as i32;
-                if count > 0 {
+                let offset = i32::from(ui.get_answer_visible());
+                if count + offset > 0 {
                     ui.set_launcher_selected(
-                        (ui.get_launcher_selected() + delta).rem_euclid(count),
+                        (ui.get_launcher_selected() + offset + delta).rem_euclid(count + offset)
+                            - offset,
                     );
                 }
             }
@@ -100,6 +110,7 @@ pub(super) fn toggle(app: &Rc<RefCell<App>>) {
         a.collapse_timer.stop();
         a.page_switch_timer.stop();
         a.launcher.open = true;
+        a.launcher.focus_epoch = a.launcher.focus_epoch.wrapping_add(1);
         if !a.launcher.loaded {
             a.launcher.recent = RecentLaunches::load(&history_path());
             a.launcher.loaded = true;
@@ -116,6 +127,8 @@ pub(super) fn toggle(app: &Rc<RefCell<App>>) {
     }
     if let Some(ui) = app.borrow().ui.upgrade() {
         ui.set_launcher_text("".into());
+        ui.set_answer_editing(false);
+        ui.set_answer_visible(false);
         ui.set_launcher_status("".into());
         ui.invoke_launcher_focus();
     }
@@ -153,6 +166,11 @@ pub(super) fn dismiss(app: &Rc<RefCell<App>>, restore: bool) {
     {
         let mut a = app.borrow_mut();
         a.launcher.open = false;
+        a.launcher.focus_epoch = a.launcher.focus_epoch.wrapping_add(1);
+        a.launcher.answer_cancel.store(true, Ordering::Release);
+        a.launcher.answer_timer.stop();
+        a.launcher.answer_pending = None;
+        a.launcher.generation = a.launcher.generation.wrapping_add(1);
         let now = a.now();
         a.coordinator.close(now);
         a.hover_intent.leave();
@@ -205,10 +223,44 @@ fn receive(app: &Rc<RefCell<App>>) {
     for event in events {
         let mut a = app.borrow_mut();
         match event {
+            Update::Answer(generation, result) => {
+                a.launcher.answer_running = false;
+                a.launcher.answer_pair = None;
+                if generation == a.launcher.generation
+                    && a.launcher.open
+                    && let Some(ui) = a.ui.upgrade()
+                {
+                    ui.set_answer_busy(false);
+                    match result {
+                        Ok(Some(answer)) => {
+                            ui.set_answer_visible(true);
+                            ui.set_answer_value(answer.value.into());
+                            ui.set_answer_detail(answer.detail.into());
+                            ui.set_answer_error(false);
+                        }
+                        Ok(None) => ui.set_answer_visible(false),
+                        Err(_error) => {
+                            ui.set_answer_visible(true);
+                            ui.set_answer_error(true);
+                            ui.set_answer_value("Unable to calculate".into());
+                            ui.set_answer_detail(
+                                "Check the expression or conversion and try again.".into(),
+                            );
+                        }
+                    }
+                }
+            }
             Update::Failed(kind, error) => {
                 match kind {
                     "catalog" => a.launcher.loading = false,
                     "icons" => a.launcher.icons_loading = false,
+                    "answer" => {
+                        a.launcher.answer_running = false;
+                        if let Some(ui) = a.ui.upgrade() {
+                            ui.set_answer_busy(false);
+                            ui.set_answer_error(true);
+                        }
+                    }
                     _ => a.launcher.launching = false,
                 }
                 if let Some(ui) = a.ui.upgrade() {
@@ -269,6 +321,7 @@ fn receive(app: &Rc<RefCell<App>>) {
         dismiss(app, false);
     }
     refresh(app);
+    start_pending_answer(app);
 }
 fn icon_size(ui: &IslandWindow) -> u32 {
     (32. * ui.get_ui_scale() * ui.window().scale_factor())
@@ -283,13 +336,17 @@ pub(super) fn refresh(app: &Rc<RefCell<App>>) {
     let mut requests: Vec<((String, u32), LaunchTarget)> = Vec::new();
     let rows = {
         let mut a = app.borrow_mut();
-        let indices = search(
+        let mut indices = search(
             &a.launcher.entries,
             &ui.get_launcher_text(),
             &a.launcher.recent,
-            6,
+            50,
         );
-        if a.launcher.results != indices {
+        indices.retain(|i| {
+            a.settings.launcher_windows || !a.launcher.entries[*i].id.starts_with("windows:")
+        });
+        indices.truncate(if ui.get_answer_visible() { 4 } else { 6 });
+        if a.launcher.results != indices && ui.get_launcher_selected() != -1 {
             ui.set_launcher_selected(0);
         }
         a.launcher.results = indices.clone();
@@ -309,7 +366,9 @@ pub(super) fn refresh(app: &Rc<RefCell<App>>) {
                 crate::LauncherResult {
                     id: entry.id.as_str().into(),
                     title: entry.name.as_str().into(),
-                    detail: if a.launcher.recent.ids().contains(&entry.id) {
+                    detail: if a.launcher.recent.ids().contains(&entry.id)
+                        && !entry.id.starts_with("windows:")
+                    {
                         format!("Recently opened · {}", entry.detail).into()
                     } else {
                         entry.detail.as_str().into()
@@ -337,6 +396,21 @@ pub(super) fn refresh(app: &Rc<RefCell<App>>) {
     }
 }
 fn activate(app: &Rc<RefCell<App>>, index: i32) {
+    if index == -1 {
+        let ui = app.borrow().ui.upgrade();
+        if let Some(ui) = ui
+            && ui.get_answer_visible()
+            && !ui.get_answer_busy()
+            && !ui.get_answer_error()
+        {
+            if let Err(error) = platform::copy_text(&ui.get_answer_value()) {
+                ui.set_launcher_status(error.into());
+            } else {
+                dismiss(app, true);
+            }
+        }
+        return;
+    }
     let target = {
         let mut a = app.borrow_mut();
         if !a.launcher.open || a.launcher.launching || index < 0 {
@@ -362,9 +436,11 @@ fn activate(app: &Rc<RefCell<App>>, index: i32) {
 
 pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
     let frame = Rc::new(std::cell::Cell::new(0));
-    for (step, delay) in [500, 2500, 3100, 3400, 3700, 4100, 5000, 6500, 7500]
-        .into_iter()
-        .enumerate()
+    for (step, delay) in [
+        500, 2500, 3100, 3400, 3700, 4100, 5000, 6500, 7500, 8500, 9500, 12000,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let weak = Rc::downgrade(app);
         let frame = frame.clone();
@@ -499,6 +575,7 @@ pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
                             let mut a = app.borrow_mut();
                             a.launcher.entries = vec![AppEntry {
                                 id: "fixture-launch".into(),
+                                keywords: vec![],
                                 name: "Launcher verification".into(),
                                 detail: "Owned fixture".into(),
                                 target: LaunchTarget::Shortcut(target),
@@ -579,6 +656,38 @@ pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
                 7 => {
                     frame.set(app.borrow().frames);
                 }
+                8 => {
+                    toggle(&app);
+                    ui.set_launcher_text("(50 + 20) / 2".into());
+                    ui.invoke_launcher_query(ui.get_launcher_text());
+                }
+                9 => {
+                    check(
+                        ui.get_answer_value() == "35" && !ui.get_answer_busy(),
+                        "fend answer card computes arithmetic",
+                    );
+                    let _ = crate::verification::snapshot(&ui, "launcher-answer");
+                    ui.set_launcher_text("100 USD in USD".into());
+                    ui.invoke_launcher_query(ui.get_launcher_text());
+                }
+                10 => {
+                    check(
+                        ui.get_answer_value() == "100 USD" && !ui.get_answer_error(),
+                        "same currency converts locally without rates",
+                    );
+                    ui.invoke_launcher_activate(-1);
+                    check(
+                        !app.borrow().launcher.open,
+                        "copying selected answer contracts notch",
+                    );
+                    let weak = Rc::downgrade(&app);
+                    let frame = frame.clone();
+                    slint::Timer::single_shot(Duration::from_millis(1500), move || {
+                        if let Some(app) = weak.upgrade() {
+                            frame.set(app.borrow().frames);
+                        }
+                    });
+                }
                 _ => {
                     check(
                         !app.borrow().launcher.open
@@ -596,4 +705,77 @@ pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
             }
         });
     }
+}
+
+pub(super) fn query_changed(app: &Rc<RefCell<App>>) {
+    let Some(ui) = app.borrow().ui.upgrade() else {
+        return;
+    };
+    let query = ui.get_launcher_text().to_string();
+    let kind = crate::launcher_answers::classify(&query);
+    let enabled = {
+        let a = app.borrow();
+        match kind {
+            Some(crate::launcher_answers::Kind::Calculator) => a.settings.launcher_calculator,
+            Some(crate::launcher_answers::Kind::Currency) => a.settings.launcher_currency,
+            None => false,
+        }
+    };
+    {
+        let mut a = app.borrow_mut();
+        if !enabled
+            || !a.launcher.answer_running
+            || a.launcher.answer_pair.is_none()
+            || a.launcher.answer_pair != crate::launcher_answers::currency_pair_key(&query)
+        {
+            a.launcher.answer_cancel.store(true, Ordering::Release);
+        }
+        a.launcher.answer_timer.stop();
+        a.launcher.answer_pending = None;
+        a.launcher.generation = a.launcher.generation.wrapping_add(1);
+    }
+    ui.set_answer_editing(
+        enabled
+            || (app.borrow().settings.launcher_calculator
+                && crate::launcher_answers::is_incomplete(&query)),
+    );
+    ui.set_answer_visible(false);
+    ui.set_answer_busy(enabled);
+    ui.set_answer_error(false);
+    ui.set_answer_value("".into());
+    ui.set_answer_detail("".into());
+    ui.set_launcher_selected(if enabled { -1 } else { 0 });
+    refresh(app);
+    if enabled {
+        let weak = Rc::downgrade(app);
+        app.borrow().launcher.answer_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(180),
+            move || {
+                if let Some(app) = weak.upgrade() {
+                    app.borrow_mut().launcher.answer_pending = Some(query.clone());
+                    start_pending_answer(&app);
+                }
+            },
+        );
+    }
+}
+fn start_pending_answer(app: &Rc<RefCell<App>>) {
+    let job = {
+        let mut a = app.borrow_mut();
+        if a.launcher.answer_running || !a.launcher.open {
+            return;
+        }
+        let Some(query) = a.launcher.answer_pending.take() else {
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        a.launcher.answer_cancel = cancel.clone();
+        a.launcher.answer_running = true;
+        a.launcher.answer_pair = crate::launcher_answers::currency_pair_key(&query);
+        (query, cancel, a.launcher.generation)
+    };
+    start(app, "answer", move || {
+        Update::Answer(job.2, crate::launcher_answers::evaluate(&job.0, &job.1))
+    });
 }

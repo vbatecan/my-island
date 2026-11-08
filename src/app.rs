@@ -59,6 +59,7 @@ use std::{
 };
 
 struct App {
+    snapshots: material::Snapshots,
     launcher: launcher::Controller,
     plugin_host: Option<Arc<crate::plugins::PluginHost>>,
     ui: slint::Weak<IslandWindow>,
@@ -384,9 +385,15 @@ impl App {
             ui.set_material_name(self.settings.appearance.name().into());
             if matches!(
                 self.settings.appearance,
-                Appearance::Glass | Appearance::LiveGlass
+                Appearance::Acrylic | Appearance::Glass | Appearance::LiveGlass
             ) {
-                let image = self.glass.borrow_mut().image_in_canvas(
+                let compositor = if self.settings.appearance == Appearance::Acrylic {
+                    Glass::frosted_image_in_canvas
+                } else {
+                    Glass::image_in_canvas
+                };
+                let image = compositor(
+                    &mut self.glass.borrow_mut(),
                     width,
                     height,
                     self.springs[2].position,
@@ -528,6 +535,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut coordinator = PresentationCoordinator::default();
     coordinator.set_selected_page(settings.selected_page.clone(), 0);
     let app = Rc::new(RefCell::new(App {
+        snapshots: material::Snapshots::default(),
         launcher: launcher::Controller::default(),
         plugin_host: None,
         ui: ui.as_weak(),

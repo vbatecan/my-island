@@ -19,6 +19,12 @@ export component IslandWindow inherits Window {
     default-font-size: (13 * root.font-pixel);
 
     out property <bool> lyrics-gap-active: synced-lines.gap-active;
+    in property <bool> answer-editing;
+    in property <bool> answer-visible;
+    in property <string> answer-value;
+    in property <string> answer-detail;
+    in property <bool> answer-busy;
+    in property <bool> answer-error;
     in property <bool> app-launcher-mode: false;
     in property <[LauncherResult]> launcher-results;
     in-out property <string> launcher-text;
@@ -174,7 +180,7 @@ export component IslandWindow inherits Window {
     in property <string> duration-label: "0:00";
     in property <image> artwork;
     in property <bool> has-artwork: false;
-    // 0: solid, 1: transparent, 2: native acrylic, 3: glass.
+    // 0: solid, 1: transparent, 2: clipped frosted acrylic, 3: refracted glass.
     in property <int> appearance: 0;
     in property <float> tint-opacity: 0.55;
     in property <string> material-name: "Solid";
@@ -276,7 +282,7 @@ export component IslandWindow inherits Window {
         height: root.shape-height * root.scaled-pixel;
         // Shape rendering includes the concave shoulders. Contents stay in the
         // central body, where a normal rectangle clip is sufficient.
-        if root.appearance == 3 && root.has-glass-texture : Image {
+        if (root.appearance == 2 || root.appearance == 3) && root.has-glass-texture : Image {
             x: -root.shoulder * root.scaled-pixel; y: 0px;
             width: parent.width + 2 * root.shoulder * root.scaled-pixel; height: parent.height;
             source: root.glass-texture; image-fit: fill;
@@ -423,6 +429,8 @@ export component IslandWindow inherits Window {
                     opacity: root.reveal;
                     font-pixel: root.font-pixel;
                     layout-pixel: root.scaled-pixel;
+                    answer-editing: root.answer-editing; answer-visible: root.answer-visible; answer-value: root.answer-value; answer-detail: root.answer-detail; answer-busy: root.answer-busy; answer-error: root.answer-error;
+                    animations-enabled: root.media-motion-enabled; animation-speed: root.animation-speed;
                     results: root.launcher-results;
                     query <=> root.launcher-text;
                     busy: root.launcher-busy;

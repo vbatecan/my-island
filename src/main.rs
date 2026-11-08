@@ -5,6 +5,7 @@ mod countdown;
 mod gestures;
 mod hover;
 mod launcher;
+mod launcher_answers;
 mod material;
 mod metrics;
 mod navigation;
@@ -17,6 +18,7 @@ mod settings;
 mod shape;
 mod state;
 mod verification;
+mod windows_commands;
 slint::include_modules!();
 fn main() {
     if let Err(error) = app::run() {

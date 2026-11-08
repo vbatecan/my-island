@@ -408,7 +408,22 @@ pub(super) fn handle_overlay_input(
     };
     if app.borrow().launcher.open {
         if matches!(event, WindowEvent::Focused(false)) {
-            launcher::dismiss(app, false);
+            // Native activation can queue a stale focus-loss event while the
+            // same HWND is becoming foreground. Reconcile after that event
+            // batch; never take focus back from another application.
+            let epoch = app.borrow().launcher.focus_epoch;
+            let weak = Rc::downgrade(app);
+            slint::Timer::single_shot(Duration::from_millis(16), move || {
+                if let Some(app) = weak.upgrade() {
+                    let current = {
+                        let a = app.borrow();
+                        a.launcher.open && a.launcher.focus_epoch == epoch
+                    };
+                    if current && !platform::launcher_has_foreground() {
+                        launcher::dismiss(&app, false);
+                    }
+                }
+            });
         }
         return EventResult::Propagate;
     }

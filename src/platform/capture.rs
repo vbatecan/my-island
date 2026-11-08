@@ -23,7 +23,7 @@ use windows::{
     Win32::{
         Foundation::{HMODULE, POINT},
         Graphics::{
-            Direct3D::D3D_DRIVER_TYPE_WARP,
+            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP},
             Direct3D11::*,
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
@@ -166,20 +166,42 @@ impl Session {
             let mut context = None;
             // SAFETY: D3D output pointers refer to initialized stack Options.
             // BGRA support is required by the WinRT capture-surface bridge.
-            // WARP avoids provisioning a second hardware rendering context: this
-            // device only copies a small CPU-read ROI and never renders geometry.
+            // Only cropped copies use this device; optical rendering is bounded
+            // separately. Prefer the lower-memory device by default and retain
+            // a hardware override for measured driver comparisons.
             unsafe {
-                D3D11CreateDevice(
-                    None,
-                    D3D_DRIVER_TYPE_WARP,
-                    HMODULE::default(),
-                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                    None,
-                    D3D11_SDK_VERSION,
-                    Some(&mut device),
-                    None,
-                    Some(&mut context),
-                )?;
+                let create =
+                    |driver,
+                     device: &mut Option<ID3D11Device>,
+                     context: &mut Option<ID3D11DeviceContext>| {
+                        D3D11CreateDevice(
+                            None,
+                            driver,
+                            HMODULE::default(),
+                            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                            None,
+                            D3D11_SDK_VERSION,
+                            Some(device),
+                            None,
+                            Some(context),
+                        )
+                    };
+                let hardware = std::env::args().any(|arg| arg == "--capture-hardware");
+                let preferred = if hardware {
+                    D3D_DRIVER_TYPE_HARDWARE
+                } else {
+                    D3D_DRIVER_TYPE_WARP
+                };
+                let fallback = if hardware {
+                    D3D_DRIVER_TYPE_WARP
+                } else {
+                    D3D_DRIVER_TYPE_HARDWARE
+                };
+                if create(preferred, &mut device, &mut context).is_err() {
+                    device = None;
+                    context = None;
+                    create(fallback, &mut device, &mut context)?;
+                }
             }
             let device = device.ok_or_else(windows::core::Error::empty)?;
             let context = context.ok_or_else(windows::core::Error::empty)?;

@@ -1,5 +1,8 @@
 # Still Island
 
+The launcher also searches Windows settings and tools (try `Bluetooth`, `uninstall programs`, or `Task Manager`). Type `(50 + 20) / 2` or `5 ft to cm` for local fend calculations, or `100 USD to SGD` for currency conversion. A selected answer copies with Enter and contracts the notch. Currency uses Frankfurter reference rates cached for six hours; only the currency pair is sent, never the amount. Settings → Behavior contains independent provider toggles. Expressions are not saved.
+
+
 Press **Alt + Space** to morph the notch into a native application launcher. Search Start Menu shortcuts and installed Windows apps, select with Up/Down, launch with Enter, and dismiss with Escape or an outside click. Settings → Behavior lets you disable the shortcut or choose Ctrl + Space / Alt + Shift + Space. Shortcut conflicts are reported in Settings. Ctrl + Alt + Space retains its existing island-panel toggle.
 
 Search ranks exact names before prefixes and fuzzy matches. Blank search shows recent successful launches, followed by alphabetical suggestions. Recent IDs stay locally in `launcher-recent.json` next to settings; clear them in Settings. Windows resolves shortcut arguments and working directories. Native icons are loaded for the current DPI and held in a bounded cache. Discovery and icon work run on demand; reopening after a minute refreshes the catalog without background polling.
@@ -116,12 +119,12 @@ Not every player exposes SMTC or every transport capability. If a player does no
 
 ## Materials and glass mathematics
 
-Transparent material uses the desktop composition surface directly. Acrylic requests the documented Windows11 `DWMSBT_TRANSIENTWINDOW` backdrop and adds the selected tint. Windows can choose a solid fallback under accessibility, transparency, power, or inactive-window policies. API acceptance is checked; unsupported acrylic falls back to transparency.
+Transparent material uses the desktop composition surface directly. Acrylic uses a sampled, blurred desktop texture clipped to the exact island contour and the selected tint. The whole-window Windows backdrop is deliberately disabled: it can paint the persistent transparent canvas gray outside the notch. Acrylic refreshes on desktop/window events rather than continuously.
 
 Both glass modes have actual **backdrop refraction**, rather than only a shiny border. The overlay is excluded from capture to prevent feedback. Pixels are filtered and refracted into a Slint bitmap; Slint continues to render the UI and spring morphs.
 
 - **Eco glass** (`--appearance=glass`) samples the desktop through GDI on hover/click/state transitions and foreground/top-level-window changes. It has no capture worker or refresh timer. Its backdrop stays frozen between these events, so an underlying video does not update continuously.
-- **Live glass** (`--appearance=live-glass`) uses borderless Windows Graphics Capture, a WARP Direct3D device, one buffer, dirty-region checks, and a30FPS backdrop ceiling. Only the canvas crop is read back. Significant pixel changes are coalesced; tiny compositor dithering is ignored. This30FPS ceiling applies to the backdrop, independently of spring animation scheduling.
+- **Live glass** (`--appearance=live-glass`) uses borderless Windows Graphics Capture, a low-memory copy device (with hardware fallback and a developer `--capture-hardware` comparison option), one buffer, dirty-region checks, and a30FPS backdrop ceiling. Only the canvas crop is read back. Significant pixel changes are coalesced; tiny compositor dithering is ignored. This30FPS ceiling applies to the backdrop, independently of spring animation scheduling.
 
 For a point `p` relative to the shape center, half-size `b`, radius `r`:
 
@@ -142,7 +145,7 @@ Bilinear backdrop sampling follows that offset. Schlick's approximation adds gra
 
 Research references: [Windows backdrop types](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type), [Khronos GLSL refraction specification](https://registry.khronos.org/OpenGL/specs/es/3.1/GLSL_ES_Specification_3.10.pdf), [Microsoft's native composition/capture samples](https://github.com/microsoft/Windows.UI.Composition-Win32-Samples), and [capture exclusion semantics](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity).
 
-Live glass is an optional higher-cost material. Its initial hardware-device implementation exceeded the original100MB ceiling; the optimized release sampled about80MiB private/95MiB working set on this machine, close to that ceiling. Its capture resources exist only while selected. Eco glass avoids that capture stack; unchanged sampled backdrops do not cause UI updates. The WinEvent hooks exclude the overlay's own process and ignore child-control movements, preventing refresh feedback. **The glass island is omitted from normal screen captures/recordings** because capture exclusion is required to prevent feedback. Internal `--verify` captures can still render it. Backdrop pixels stay in RAM; they are never sent over the network or written to disk during normal use. Explicit verification captures write local BMPs. If borderless capture is unsupported, live glass falls back to acrylic with an error message, without requesting a permission prompt or changing Windows security settings.
+Live glass is an optional higher-cost material. See [current material verification](MATERIALS-VERIFICATION.md) for release memory and CPU measurements; older MVP figures do not represent the launcher-sized scenes. Its capture resources exist only while selected. Eco glass avoids that capture stack; unchanged sampled backdrops do not cause UI updates. The WinEvent hooks exclude the overlay's own process and ignore child-control movements, preventing refresh feedback. **Acrylic and glass are omitted from normal screen captures/recordings** because capture exclusion is required to prevent feedback. Internal `--verify` captures can still render it. Backdrop pixels stay in RAM; they are never sent over the network or written to disk during normal use. Explicit verification captures write local BMPs. If borderless capture is unsupported, live glass falls back to acrylic with an error message, without requesting a permission prompt or changing Windows security settings.
 
 ## Architecture and verification
 
@@ -163,7 +166,7 @@ The media probe publishes its own silent native SMTC fixture, refuses commands u
 
 ## Remaining limits
 
-Primary-monitor support and native startup registration are implemented; additional physical DPI scales, live monitor topology changes, actual next-sign-in launch, and packaged StartupTask enablement still require device testing. No media playback engine, cloud, or telemetry. Installed notification consent and fullscreen/hotplug behavior require the device tests recorded in the current milestone report. The native acrylic material can be altered by Windows policies. Actual presentation FPS and exhaustive manual rounded-edge clicking have not been measured. Material captures and native hit-routing readback are verified separately.
+Primary-monitor support and native startup registration are implemented; additional physical DPI scales, live monitor topology changes, actual next-sign-in launch, and packaged StartupTask enablement still require device testing. No media playback engine, cloud, or telemetry. Installed notification consent and fullscreen/hotplug behavior require the device tests recorded in the current milestone report. Acrylic and glass require supported desktop capture/exclusion behavior. Actual presentation FPS and exhaustive manual rounded-edge clicking have not been measured. Material captures and native hit-routing readback are verified separately.
 
 The original source is MIT licensed. Dependencies retain their own licenses, including Slint's applicable GPL/commercial/royalty-free options.
 

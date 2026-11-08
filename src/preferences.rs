@@ -74,6 +74,9 @@ pub fn populate(
     ui.set_outside_click(s.outside_click);
     ui.set_shortcut_enabled(s.shortcut_enabled);
     ui.set_launcher_enabled(s.launcher_enabled);
+    ui.set_launcher_windows(s.launcher_windows);
+    ui.set_launcher_calculator(s.launcher_calculator);
+    ui.set_launcher_currency(s.launcher_currency);
     ui.set_launcher_shortcut(s.launcher_shortcut as i32);
     ui.set_fullscreen_hide(s.fullscreen_hide);
     let mut names = vec!["Primary display (automatic)".into()];
@@ -142,6 +145,9 @@ pub fn read(ui: &SettingsWindow, old: &Settings, monitors: &[MonitorInfo]) -> Se
     s.outside_click = ui.get_outside_click();
     s.shortcut_enabled = ui.get_shortcut_enabled();
     s.launcher_enabled = ui.get_launcher_enabled();
+    s.launcher_windows = ui.get_launcher_windows();
+    s.launcher_calculator = ui.get_launcher_calculator();
+    s.launcher_currency = ui.get_launcher_currency();
     s.launcher_shortcut = ui.get_launcher_shortcut().max(0) as u32;
     s.fullscreen_hide = ui.get_fullscreen_hide();
     s.monitor_id = if ui.get_monitor_index() > 0 {

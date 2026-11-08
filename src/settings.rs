@@ -45,6 +45,9 @@ pub struct Settings {
     pub outside_click: bool,
     pub shortcut_enabled: bool,
     pub launcher_enabled: bool,
+    pub launcher_windows: bool,
+    pub launcher_calculator: bool,
+    pub launcher_currency: bool,
     pub launcher_shortcut: u32,
     pub fullscreen_hide: bool,
     pub monitor_id: String,
@@ -54,6 +57,9 @@ impl Default for Settings {
         Self {
             selected_page: None,
             launcher_enabled: true,
+            launcher_windows: true,
+            launcher_calculator: true,
+            launcher_currency: true,
             launcher_shortcut: 0,
             animations: true,
             animation_speed: 1.,
@@ -340,6 +346,9 @@ impl Settings {
                     }
                     "outside_click" => s.outside_click = v != "false",
                     "shortcut_enabled" => s.shortcut_enabled = v != "false",
+                    "launcher_windows" => s.launcher_windows = v != "false",
+                    "launcher_calculator" => s.launcher_calculator = v != "false",
+                    "launcher_currency" => s.launcher_currency = v != "false",
                     "launcher_enabled" => s.launcher_enabled = v != "false",
                     "launcher_shortcut" => {
                         if let Ok(value) = v.parse() {
@@ -423,6 +432,10 @@ impl Settings {
                 text.push_str(&format!("blocked_app={app}\n"));
             }
         }
+        text.push_str(&format!(
+            "launcher_windows={}\nlauncher_calculator={}\nlauncher_currency={}\n",
+            self.launcher_windows, self.launcher_calculator, self.launcher_currency
+        ));
         text
     }
     pub fn save(&self) -> std::io::Result<()> {

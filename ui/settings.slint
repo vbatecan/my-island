@@ -74,6 +74,9 @@ export component SettingsWindow inherits Window {
     in-out property <int> volume-step: 2;
     in-out property <bool> outside-click: true;
     in-out property <bool> shortcut-enabled: true;
+    in-out property <bool> launcher-windows: true;
+    in-out property <bool> launcher-calculator: true;
+    in-out property <bool> launcher-currency: true;
     in-out property <bool> launcher-enabled: true;
     in-out property <int> launcher-shortcut: 0;
     callback clear-launcher-history();
@@ -248,6 +251,9 @@ export component SettingsWindow inherits Window {
                         CheckBox { text: "Enable Ctrl + Alt + Space shortcut"; checked <=> root.shortcut-enabled; toggled => { root.changed(); } }
                         CheckBox { text: "Enable application launcher shortcut"; checked <=> root.launcher-enabled; toggled => { root.changed(); } }
                         ComboBox { model: ["Alt + Space", "Ctrl + Space", "Alt + Shift + Space"]; current-index <=> root.launcher-shortcut; enabled: root.launcher-enabled; selected(_) => { root.changed(); } }
+                        CheckBox { text: "Search Windows settings and tools"; checked <=> root.launcher-windows; toggled => { root.changed(); } }
+                        CheckBox { text: "Calculator and unit conversions"; checked <=> root.launcher-calculator; toggled => { root.changed(); } }
+                        CheckBox { text: "Currency conversion (Frankfurter)"; checked <=> root.launcher-currency; toggled => { root.changed(); } }
                         Button { text: "Clear recent launches"; clicked => { root.clear-launcher-history(); } }
                         Note { text: "Launcher mode receives keyboard focus for search. Enter launches, arrows select, Escape closes. Ordinary island panels stay nonactivating. Shortcut conflicts are reported here."; }
                         Rule {}

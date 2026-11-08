@@ -35,7 +35,13 @@ try{
     Start-Sleep -Milliseconds 1900
     $application.Refresh()
     $expanded=[pscustomobject]@{State='launcher';PrivateBytes=$application.PrivateMemorySize64;WorkingSetBytes=$application.WorkingSet64}
-    @($idle,$expanded)|Export-Csv -NoTypeInformation (Join-Path $run 'memory.csv')
+    Start-Sleep -Milliseconds 6400
+    $application.Refresh()
+    $calculator=[pscustomobject]@{State='calculator';PrivateBytes=$application.PrivateMemorySize64;WorkingSetBytes=$application.WorkingSet64}
+    Start-Sleep -Milliseconds 1000
+    $application.Refresh()
+    $currency=[pscustomobject]@{State='same-currency';PrivateBytes=$application.PrivateMemorySize64;WorkingSetBytes=$application.WorkingSet64}
+    @($idle,$expanded,$calculator,$currency)|Export-Csv -NoTypeInformation (Join-Path $run 'memory.csv')
     if(-not $application.WaitForExit(20000)){throw 'Launcher verification exceeded its finite deadline.'}
     if($application.ExitCode -ne 0){throw "Launcher exited $($application.ExitCode)."}
     $lines=@(Get-Content $trace | Select-Object -Skip $offset)
@@ -47,7 +53,7 @@ try{
     $history=Get-Content (Join-Path $profile 'launcher-recent.json') -Raw|ConvertFrom-Json
     if($history.ids[0] -ne 'fixture-launch'){throw 'Successful launch was not persisted.'}
     Write-Output "PASS launcher UI, owned launch, and history; $run"
-    @($idle,$expanded)|Format-Table
+    @($idle,$expanded,$calculator,$currency)|Format-Table
 }finally{
     if(-not $application.HasExited){$null=$application.CloseMainWindow();if(-not $application.WaitForExit(2000)){$application.Kill()}}
     $application.Dispose()

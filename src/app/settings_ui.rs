@@ -160,6 +160,13 @@ pub(super) fn apply_settings(app: &Rc<RefCell<App>>, mut settings: Settings, per
         startup::request(app, settings.launch_at_startup);
     }
     sync_presentation(app);
+    if app.borrow().launcher.open
+        && (old.launcher_windows != settings.launcher_windows
+            || old.launcher_calculator != settings.launcher_calculator
+            || old.launcher_currency != settings.launcher_currency)
+    {
+        launcher::query_changed(app);
+    }
     interaction::refresh_pointer(app);
     refresh_preferences(app);
 }

@@ -1,6 +1,8 @@
 //! Finite native test. It launches only the separately built owned marker fixture.
 #[path = "../../src/platform/launcher.rs"]
 mod launcher;
+#[path = "../../src/windows_commands.rs"]
+mod windows_commands;
 
 use std::{
     os::windows::ffi::OsStrExt,
@@ -96,7 +98,11 @@ fn main() {
         .iter()
         .filter(|entry| matches!(entry.target, launcher::LaunchTarget::AppId(_)))
         .collect();
-    let shortcuts = catalog.entries.len() - apps.len();
+    let shortcuts = catalog
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.target, launcher::LaunchTarget::Shortcut(_)))
+        .count();
     let mut shortcut_icons = 0;
     for entry in catalog
         .entries

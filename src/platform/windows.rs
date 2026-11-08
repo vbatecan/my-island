@@ -136,6 +136,15 @@ pub fn attach(hwnd: isize) -> Result<(), String> {
     // SAFETY: caller supplies the live Slint HWND belonging to this UI thread.
     // The subclass never owns the HWND and forwards all unhandled messages.
     unsafe {
+        // The overlay owns its morph animation. DWM's activation/show transition
+        // can blend an opaque redirection surface into this transparent GL HWND.
+        let disabled = BOOL(1);
+        let _ = ::windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+            hwnd,
+            ::windows::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disabled as *const _ as _,
+            size_of::<BOOL>() as u32,
+        );
         let styles = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         SetWindowLongPtrW(
             hwnd,
@@ -367,7 +376,12 @@ pub fn set_keyboard_mode(active: bool, restore_focus: bool) -> Result<(), String
             } as isize,
         );
         if active {
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            // The persistent overlay is normally already visible. Re-showing
+            // it during activation can expose the native class background
+            // before the transparent GPU surface is presented.
+            if !IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
             if !SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() != hwnd {
                 NATIVE.with(|n| n.borrow_mut().keyboard_mode = false);
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style | WS_EX_NOACTIVATE.0) as isize);
@@ -383,6 +397,12 @@ pub fn set_keyboard_mode(active: bool, restore_focus: bool) -> Result<(), String
         }
     }
     refresh_input_hooks()
+}
+
+pub fn launcher_has_foreground() -> bool {
+    let hwnd = NATIVE.with(|n| n.borrow().hwnd);
+    // SAFETY: read-only query; both handles remain owned by Windows.
+    unsafe { !hwnd.is_invalid() && GetForegroundWindow() == hwnd }
 }
 
 fn refresh_input_hooks() -> Result<(), String> {
@@ -973,6 +993,28 @@ unsafe extern "system" fn subclass(
             return LRESULT(1);
         }
         match msg {
+            WM_NCACTIVATE => {
+                // Forward activation to Winit so its focus state stays correct,
+                // but use the documented -1 to prevent DefWindowProc painting
+                // native active/inactive frame colors over our frameless view.
+                return DefSubclassProc(hwnd, msg, wparam, LPARAM(-1));
+            }
+            WM_SYSCOMMAND if (wparam.0 as u32 & 0xfff0) == SC_KEYMENU => {
+                // This frameless overlay has no system menu. Alt+Space is our
+                // registered launcher chord, not a request for the standard
+                // opaque Windows menu (including delayed activation messages).
+                return LRESULT(0);
+            }
+            WM_SYSCHAR if wparam.0 == VK_SPACE.0 as usize => {
+                return LRESULT(0);
+            }
+            WM_ERASEBKGND => {
+                // Slint paints the complete transparent surface. A separate
+                // Win32 class-brush erase would show an opaque white frame
+                // between activation/style changes and the next GPU present.
+                // WM_PAINT still reaches the backend below.
+                return LRESULT(1);
+            }
             WM_STYLECHANGING => {
                 // Winit recomputes styles when visibility or DPI changes. Keep
                 // overlay invariants in the proposed styles before Windows applies
@@ -1257,8 +1299,10 @@ impl Drop for InstanceGuard {
     }
 }
 
-/// Apply documented Windows 11 compositor backdrops. Success indicates DWM accepted
-/// the material; Windows may choose a solid accessibility/battery-saver fallback.
+/// Preserve the backend's per-pixel-transparent composition surface.
+/// Acrylic is a clipped, cached frosted texture in Slint, not a system backdrop:
+/// DWMSBT_TRANSIENTWINDOW applies behind the entire persistent canvas and can
+/// expose an opaque gray panel outside the currently drawn island.
 pub fn set_appearance(appearance: Appearance) -> Result<(), String> {
     use ::windows::Win32::Graphics::Dwm::*;
     let hwnd = NATIVE.with(|n| {
@@ -1278,11 +1322,7 @@ pub fn set_appearance(appearance: Appearance) -> Result<(), String> {
             &dark as *const _ as _,
             size_of::<i32>() as u32,
         );
-        let kind = if matches!(appearance, Appearance::Acrylic) {
-            DWMSBT_TRANSIENTWINDOW
-        } else {
-            DWMSBT_NONE
-        };
+        let kind = DWMSBT_NONE;
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE,
@@ -1290,16 +1330,10 @@ pub fn set_appearance(appearance: Appearance) -> Result<(), String> {
             size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
         )
         .map_err(|e| format!("Windows backdrop unavailable: {e}"))?;
-        let margins = ::windows::Win32::UI::Controls::MARGINS {
-            cxLeftWidth: if appearance == Appearance::Acrylic {
-                -1
-            } else {
-                0
-            },
-            cxRightWidth: 0,
-            cyTopHeight: 0,
-            cyBottomHeight: 0,
-        };
+        // Reset any previous full-frame extension. Do not change Winit's empty
+        // blur-region registration: it is what preserves per-pixel alpha on its
+        // transparent OpenGL window; legacy blur-behind is not Windows 11 Acrylic.
+        let margins = ::windows::Win32::UI::Controls::MARGINS::default();
         DwmExtendFrameIntoClientArea(hwnd, &margins).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1360,7 +1394,7 @@ unsafe extern "system" fn backdrop_event(
     queue_policy();
     let hwnd = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
-        if n.appearance != Appearance::Glass || n.refresh_pending {
+        if !matches!(n.appearance, Appearance::Glass | Appearance::Acrylic) || n.refresh_pending {
             return None;
         }
         n.refresh_pending = true;
@@ -1375,8 +1409,17 @@ unsafe extern "system" fn backdrop_event(
 
 /// Low-overhead, on-demand sampling of the real desktop beneath the excluded
 /// overlay. Eco glass calls this on interaction/window events, never on a timer.
+#[allow(dead_code)] // Retained synchronous adapter for opt-in native diagnostics.
 pub fn capture_snapshot() -> Result<super::capture::BackdropFrame, String> {
-    let (left, top, width, height) = capture_bounds()?;
+    capture_snapshot_at(capture_bounds()?)
+}
+
+/// Capture a previously resolved physical-pixel rectangle. This helper does not
+/// access UI-thread state: every GDI handle is created and released on its caller
+/// thread, allowing snapshot sampling to run off the GUI event loop.
+pub fn capture_snapshot_at(
+    (left, top, width, height): (i32, i32, u32, u32),
+) -> Result<super::capture::BackdropFrame, String> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err("Invalid desktop sample size".into());
     }
@@ -1477,6 +1520,41 @@ pub fn settle_exclusion() {
     }
 }
 
+/// Copy Unicode text. Windows owns the allocation only after SetClipboardData
+/// succeeds; every earlier failure releases it and closes the clipboard.
+pub fn copy_text(text: &str) -> Result<(), String> {
+    use windows::Win32::System::{DataExchange::*, Memory::*};
+    let hwnd = NATIVE.with(|n| n.borrow().hwnd);
+    let data: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: UI-owned HWND, moveable allocation sized for all UTF16 code units.
+    unsafe {
+        OpenClipboard(Some(hwnd)).map_err(|e| e.to_string())?;
+        struct Close;
+        impl Drop for Close {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+            }
+        }
+        let _close = Close;
+        let memory = GlobalAlloc(GMEM_MOVEABLE, data.len() * 2).map_err(|e| e.to_string())?;
+        let ptr = GlobalLock(memory);
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(memory));
+            return Err("Cannot allocate clipboard text".into());
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u16>(), data.len());
+        let _ = GlobalUnlock(memory);
+        let result = EmptyClipboard().and_then(|_| SetClipboardData(13, Some(HANDLE(memory.0))));
+        if let Err(e) = result {
+            let _ = GlobalFree(Some(memory));
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod fullscreen_tests {
     use super::*;
@@ -1555,5 +1633,104 @@ mod fullscreen_tests {
         ));
         assert!(!covers_monitor(RECT { top: 31, ..monitor }, monitor));
         assert!(!covers_monitor(RECT::default(), monitor));
+    }
+}
+
+#[cfg(test)]
+mod acrylic_native_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Requires Windows 11 with an interactive DWM desktop"]
+    fn acrylic_keeps_compositor_off_canvas_and_exact_native_hit_region() {
+        // A hidden owned fixture exercises the real DWM/region APIs without
+        // changing user preferences, showing windows, or sending desktop input.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!("Still Island acrylic clipping fixture"),
+                WS_POPUP,
+                0,
+                0,
+                1040,
+                648,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create owned hidden window")
+        };
+        struct Fixture(HWND, Option<Native>);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Some(previous) = self.1.take() {
+                    NATIVE.with(|n| *n.borrow_mut() = previous);
+                }
+                // SAFETY: this fixture owns the HWND on its creating thread.
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let previous = NATIVE.with(|n| {
+            n.replace(Native {
+                hwnd,
+                shape: Shape {
+                    ui_scale: 1.3,
+                    canvas_height: 498.,
+                    ..Shape::default()
+                },
+                ..Native::default()
+            })
+        });
+        let _fixture = Fixture(hwnd, Some(previous));
+        for appearance in [
+            Appearance::Solid,
+            Appearance::Acrylic,
+            Appearance::Transparent,
+        ] {
+            set_appearance(appearance).expect("configure transparent native composition");
+            let mut backdrop = 0i32;
+            // SAFETY: live hidden fixture and a correctly sized output integer.
+            unsafe {
+                ::windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                    hwnd,
+                    ::windows::Win32::Graphics::Dwm::DWMWA_SYSTEMBACKDROP_TYPE,
+                    &mut backdrop as *mut _ as _,
+                    size_of::<i32>() as u32,
+                )
+                .expect("read actual compositor configuration");
+            }
+            assert_eq!(
+                backdrop, 1,
+                "no full-canvas DWM material for {appearance:?}"
+            );
+        }
+        for (width, height, radius) in [(126., 32., 16.), (560., 400., 8.), (220., 48., 24.)] {
+            NATIVE.with(|n| {
+                let mut n = n.borrow_mut();
+                n.shape.width = width;
+                n.shape.height = height;
+                n.shape.radius = radius;
+            });
+            region();
+            // SAFETY: temporary copied region is owned here and deleted below.
+            unsafe {
+                let copy = CreateRectRgn(0, 0, 0, 0);
+                assert!(GetWindowRgn(hwnd, copy).0 > 1);
+                assert!(PtInRegion(copy, 520, (height * 0.65) as i32).as_bool());
+                assert!(
+                    !PtInRegion(copy, 1, 1).as_bool(),
+                    "canvas corner stays outside native mask"
+                );
+                assert!(
+                    !PtInRegion(copy, 520, (height * 1.3 + 4.) as i32).as_bool(),
+                    "area below island stays outside mask"
+                );
+                let _ = DeleteObject(HGDIOBJ(copy.0));
+            }
+        }
     }
 }

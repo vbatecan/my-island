@@ -45,6 +45,7 @@ pub enum LaunchTarget {
     Shortcut(PathBuf),
     /// A Shell AppsFolder child parsing name, not a command line.
     AppId(String),
+    WindowsCommand(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub struct AppEntry {
     pub id: String,
     pub name: String,
     pub detail: String,
+    pub keywords: Vec<String>,
     pub target: LaunchTarget,
 }
 
@@ -166,6 +168,7 @@ fn scan_shortcuts(root: &Path, catalog: &mut Catalog) {
                     id: format!("shortcut:{}", path.to_string_lossy().to_lowercase()),
                     name,
                     detail: "Start Menu".into(),
+                    keywords: vec![],
                     target: LaunchTarget::Shortcut(path),
                 });
             }
@@ -227,6 +230,7 @@ fn scan_apps(catalog: &mut Catalog) -> Result<(), String> {
                 id: format!("app:{}", target.to_lowercase()),
                 name,
                 detail: "Installed app".into(),
+                keywords: vec![],
                 target: LaunchTarget::AppId(target),
             });
         }
@@ -254,6 +258,22 @@ pub fn enumerate() -> Result<Catalog, String> {
     if let Err(error) = scan_apps(&mut catalog) {
         catalog.warnings.push(error);
     }
+    catalog
+        .entries
+        .extend(crate::windows_commands::ENTRIES.iter().map(|entry| {
+            AppEntry {
+                id: format!("windows:{}", entry.id),
+                name: entry.label.into(),
+                detail: if entry.executable.is_empty() {
+                    "Windows Settings"
+                } else {
+                    "Windows system tool"
+                }
+                .into(),
+                keywords: entry.keywords.split('|').map(str::to_owned).collect(),
+                target: LaunchTarget::WindowsCommand(entry.id.into()),
+            }
+        }));
     catalog.entries.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -272,6 +292,7 @@ fn target_name(target: &LaunchTarget) -> OsString {
     match target {
         LaunchTarget::Shortcut(path) => path.as_os_str().to_owned(),
         LaunchTarget::AppId(id) => OsString::from(format!("shell:AppsFolder\\{id}")),
+        LaunchTarget::WindowsCommand(_) => OsString::new(),
     }
 }
 
@@ -280,7 +301,28 @@ fn target_name(target: &LaunchTarget) -> OsString {
 /// Success means the Shell accepted launch, not that the app has finished opening.
 pub fn launch(target: &LaunchTarget) -> Result<(), String> {
     let _apartment = Apartment::new()?;
-    let target = wide(&target_name(target))?;
+    let command = if let LaunchTarget::WindowsCommand(id) = target {
+        Some(crate::windows_commands::resolve(id)?)
+    } else {
+        None
+    };
+    let name = if let Some(entry) = command {
+        if entry.executable.is_empty() {
+            OsString::from(entry.argument)
+        } else {
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+                .join("System32")
+                .join(entry.executable)
+                .into_os_string()
+        }
+    } else {
+        target_name(target)
+    };
+    let parameters = command
+        .filter(|entry| !entry.executable.is_empty() && !entry.argument.is_empty())
+        .map(|entry| wide(std::ffi::OsStr::new(entry.argument)))
+        .transpose()?;
+    let target = wide(&name)?;
     // SAFETY: the NUL-terminated strings outlive the synchronous Shell call.
     // No parameters are supplied and no untrusted string is treated as a command.
     let result = unsafe {
@@ -288,7 +330,10 @@ pub fn launch(target: &LaunchTarget) -> Result<(), String> {
             None,
             w!("open"),
             PCWSTR(target.as_ptr()),
-            None,
+            parameters
+                .as_ref()
+                .map(|value| PCWSTR(value.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
             None,
             SW_SHOWNORMAL,
         )
@@ -326,6 +371,9 @@ impl Drop for MemoryDc {
 /// low-resolution image. Cache by stable application ID and physical_size in the
 /// controller. This function keeps no GDI resources alive after returning.
 pub fn load_icon(target: &LaunchTarget, physical_size: u32) -> Result<IconPixels, String> {
+    if matches!(target, LaunchTarget::WindowsCommand(_)) {
+        return Err("Use Windows command category icon".into());
+    }
     let _apartment = Apartment::new()?;
     let size = physical_size.clamp(16, 256);
     let target = wide(&target_name(target))?;
