@@ -9,7 +9,7 @@ enum Update {
     Failed(&'static str, String),
     Catalog(Result<platform::launcher::Catalog, String>),
     Icons(Vec<((String, u32), Option<IconPixels>)>),
-    Launched(String, Result<(), String>),
+    Launched(String, String, Result<(), String>),
 }
 #[derive(Default)]
 pub(super) struct Controller {
@@ -28,7 +28,8 @@ pub(super) struct Controller {
     indexed: Option<Instant>,
     loading: bool,
     icons_loading: bool,
-    launching: bool,
+    deferred_launch_error: Option<String>,
+    shown_launch_error: bool,
     cache: HashMap<(String, u32), Option<slint::Image>>,
     inbox: Arc<Mutex<VecDeque<Update>>>,
 }
@@ -125,11 +126,17 @@ pub(super) fn toggle(app: &Rc<RefCell<App>>) {
         settings_status(app, &error);
         return;
     }
+    let launch_error = {
+        let mut a = app.borrow_mut();
+        let error = a.launcher.deferred_launch_error.take();
+        a.launcher.shown_launch_error = error.is_some();
+        error
+    };
     if let Some(ui) = app.borrow().ui.upgrade() {
         ui.set_launcher_text("".into());
         ui.set_answer_editing(false);
         ui.set_answer_visible(false);
-        ui.set_launcher_status("".into());
+        ui.set_launcher_status(launch_error.unwrap_or_default().into());
         ui.invoke_launcher_focus();
     }
     let weak = Rc::downgrade(app);
@@ -195,10 +202,12 @@ fn start(
     if let Err(error) = std::thread::Builder::new()
         .name("island-launcher".into())
         .spawn(move || {
+            // Never hold the inbox lock during Shell/network work: receive runs on the UI thread.
+            let update = task();
             inbox
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push_back(task());
+                .push_back(update);
             let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_launcher_updated());
         })
     {
@@ -219,8 +228,9 @@ fn receive(app: &Rc<RefCell<App>>) {
             .drain(..)
             .collect::<Vec<_>>()
     };
-    let mut close = false;
+    let mut refresh_needed = false;
     for event in events {
+        refresh_needed |= !matches!(&event, Update::Launched(..) | Update::Failed("launch", _));
         let mut a = app.borrow_mut();
         match event {
             Update::Answer(generation, result) => {
@@ -261,7 +271,13 @@ fn receive(app: &Rc<RefCell<App>>) {
                             ui.set_answer_error(true);
                         }
                     }
-                    _ => a.launcher.launching = false,
+                    "launch" => {
+                        record(&format!("Launcher worker could not start: {error}"));
+                        a.launcher.deferred_launch_error =
+                            Some("Couldn’t open application. Try again.".into());
+                        continue;
+                    }
+                    _ => {}
                 }
                 if let Some(ui) = a.ui.upgrade() {
                     ui.set_launcher_status(error.into());
@@ -273,12 +289,16 @@ fn receive(app: &Rc<RefCell<App>>) {
                 match result {
                     Ok(catalog) => {
                         a.launcher.entries = catalog.entries;
-                        if let Some(ui) = a.ui.upgrade() {
+                        if !a.launcher.shown_launch_error
+                            && let Some(ui) = a.ui.upgrade()
+                        {
                             ui.set_launcher_status(catalog.warnings.join(" · ").into());
                         }
                     }
                     Err(error) => {
-                        if let Some(ui) = a.ui.upgrade() {
+                        if !a.launcher.shown_launch_error
+                            && let Some(ui) = a.ui.upgrade()
+                        {
                             ui.set_launcher_status(error.into());
                         }
                     }
@@ -298,30 +318,25 @@ fn receive(app: &Rc<RefCell<App>>) {
                     a.launcher.cache.insert(key, image);
                 }
             }
-            Update::Launched(id, result) => {
-                a.launcher.launching = false;
-                match result {
-                    Ok(()) => {
-                        a.launcher.recent.record(&id);
-                        if let Err(error) = a.launcher.recent.save(&history_path()) {
-                            record(&format!("Launcher history could not be saved: {error}"));
-                        }
-                        close = true;
-                    }
-                    Err(error) => {
-                        if let Some(ui) = a.ui.upgrade() {
-                            ui.set_launcher_status(error.into());
-                        }
+            Update::Launched(id, name, result) => match result {
+                Ok(()) => {
+                    a.launcher.recent.record(&id);
+                    if let Err(error) = a.launcher.recent.save(&history_path()) {
+                        record(&format!("Launcher history could not be saved: {error}"));
                     }
                 }
-            }
+                Err(error) => {
+                    record(&format!("Launcher could not open {name}: {error}"));
+                    a.launcher.deferred_launch_error =
+                        Some(format!("Couldn’t open {name}. Try again."));
+                }
+            },
         }
     }
-    if close {
-        dismiss(app, false);
+    if refresh_needed {
+        refresh(app);
+        start_pending_answer(app);
     }
-    refresh(app);
-    start_pending_answer(app);
 }
 fn icon_size(ui: &IslandWindow) -> u32 {
     (32. * ui.get_ui_scale() * ui.window().scale_factor())
@@ -350,7 +365,7 @@ pub(super) fn refresh(app: &Rc<RefCell<App>>) {
             ui.set_launcher_selected(0);
         }
         a.launcher.results = indices.clone();
-        ui.set_launcher_busy(a.launcher.loading || a.launcher.launching);
+        ui.set_launcher_busy(a.launcher.loading);
         indices
             .into_iter()
             .map(|index| {
@@ -412,8 +427,8 @@ fn activate(app: &Rc<RefCell<App>>, index: i32) {
         return;
     }
     let target = {
-        let mut a = app.borrow_mut();
-        if !a.launcher.open || a.launcher.launching || index < 0 {
+        let a = app.borrow();
+        if !a.launcher.open || index < 0 {
             return;
         }
         let Some(entry) = a
@@ -425,12 +440,18 @@ fn activate(app: &Rc<RefCell<App>>, index: i32) {
         else {
             return;
         };
-        a.launcher.launching = true;
-        (entry.id, entry.target)
+        (entry.id, entry.name, entry.target)
     };
-    refresh(app);
+    // Release focus and start the existing spring before asking Windows to launch.
+    dismiss(app, false);
+    // The isolated launcher harness keeps its owned Shell request pending long
+    // enough to exercise reopening through the same activation/completion path.
+    let verification_delay = app.borrow().verification;
     start(app, "launch", move || {
-        Update::Launched(target.0, platform::launcher::launch(&target.1))
+        if verification_delay {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Update::Launched(target.0, target.1, platform::launcher::launch(&target.2))
     });
 }
 
@@ -585,6 +606,13 @@ pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
                             ui.set_launcher_text("".into());
                             refresh(&app);
                             key(slint::platform::Key::Return.into());
+                            check(
+                                !app.borrow().launcher.open,
+                                "activation contracts synchronously before worker completion",
+                            );
+                            toggle(&app);
+                            ui.set_launcher_text("fixture".into());
+                            ui.invoke_launcher_query(ui.get_launcher_text());
                         }
                     } else {
                         check(false, "owned launch shortcut supplied");
@@ -592,8 +620,8 @@ pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
                 }
                 6 => {
                     check(
-                        !app.borrow().launcher.open,
-                        "Enter launch dismisses launcher",
+                        app.borrow().launcher.open && ui.get_launcher_text() == "fixture",
+                        "late launch completion preserves reopened launcher",
                     );
                     check(
                         RecentLaunches::load(&history_path())
@@ -602,8 +630,36 @@ pub(super) fn setup_verification(app: &Rc<RefCell<App>>) {
                             .is_some_and(|id| id == "fixture-launch"),
                         "accepted launch persisted as most recent",
                     );
-                    // Notifications stay queued while actively typing.
+                    let status = ui.get_launcher_status();
+                    app.borrow()
+                        .launcher
+                        .inbox
+                        .lock()
+                        .unwrap()
+                        .push_back(Update::Launched(
+                            "fixture-failed".into(),
+                            "Unavailable fixture".into(),
+                            Err("owned failure".into()),
+                        ));
+                    ui.invoke_launcher_updated();
+                    check(
+                        app.borrow().launcher.open && ui.get_launcher_status() == status,
+                        "late launch failure leaves current session intact",
+                    );
+                    dismiss(&app, false);
                     toggle(&app);
+                    check(
+                        ui.get_launcher_status() == "Couldn’t open Unavailable fixture. Try again."
+                            && !app
+                                .borrow()
+                                .launcher
+                                .recent
+                                .ids()
+                                .iter()
+                                .any(|id| id == "fixture-failed"),
+                        "failure deferred to next open and absent from history",
+                    );
+                    // Notifications stay queued while actively typing.
                     {
                         let mut a = app.borrow_mut();
                         let now = a.now();
