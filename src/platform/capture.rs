@@ -51,7 +51,7 @@ pub struct BackdropFrame {
 /// A live capture session exists only while Glass is selected. Windows supplies
 /// FrameArrived events; no timer, desktop polling, files, or network are used.
 pub struct CaptureService {
-    stop: Sender<()>,
+    stop: Sender<bool>,
     worker: Option<JoinHandle<()>>,
 }
 impl CaptureService {
@@ -59,12 +59,14 @@ impl CaptureService {
         rect: (i32, i32, u32, u32),
         monitor_handle: isize,
         on_frame: impl Fn(BackdropFrame) + Send + Sync + 'static,
+        on_error: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<Self, String> {
         if rect.2 == 0 || rect.3 == 0 || rect.2 > 4096 || rect.3 > 4096 {
             return Err("Invalid glass backdrop capture size".into());
         }
         let (stop, stopped) = mpsc::channel();
-        let (ready, initialization) = mpsc::sync_channel(1);
+        let wake = stop.clone();
+
         let callback: Arc<dyn Fn(BackdropFrame) + Send + Sync> = Arc::new(on_frame);
         let worker = thread::Builder::new()
             .name("island-backdrop".into())
@@ -72,19 +74,48 @@ impl CaptureService {
                 // SAFETY: this new worker has no COM apartment. Every WinRT resource
                 // is released before the matching RoUninitialize on this thread.
                 if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
-                    let _ = ready.send(Err(format!(
-                        "Backdrop WinRT initialization failed: {error}"
-                    )));
+                    on_error(format!("Backdrop WinRT initialization failed: {error}"));
                     return;
                 }
-                match Session::new(rect, monitor_handle, callback) {
+                match Session::new(rect, monitor_handle, callback, wake) {
                     Ok(session) => {
-                        let _ = ready.send(Ok(()));
-                        let _ = stopped.recv();
+                        loop {
+                            let pending = session.readback.as_ref().is_some_and(|r| {
+                                r.lock()
+                                    .is_ok_and(|r| r.slots.iter().any(|s| s.pending.is_some()))
+                            });
+                            let stopped_now = if pending {
+                                matches!(
+                                    stopped.recv_timeout(Duration::from_millis(2)),
+                                    Ok(true) | Err(mpsc::RecvTimeoutError::Disconnected)
+                                )
+                            } else {
+                                !matches!(stopped.recv(), Ok(false))
+                            };
+                            if stopped_now {
+                                break;
+                            }
+                            if let Some(readback) = &session.readback
+                                && let Ok(mut state) = readback.lock()
+                            {
+                                match state.poll() {
+                                    Ok(Some(image)) => {
+                                        if let Some(notify) = &session.notify {
+                                            notify(image);
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        on_error(format!("Backdrop device interrupted: {error}"));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         drop(session);
                     }
                     Err(error) => {
-                        let _ = ready.send(Err(error));
+                        on_error(error);
                     }
                 }
                 // SAFETY: paired with successful RoInitialize on this exact thread.
@@ -93,30 +124,18 @@ impl CaptureService {
                 }
             })
             .map_err(|e| format!("Could not start backdrop capture: {e}"))?;
-        match initialization.recv_timeout(Duration::from_secs(8)) {
-            Ok(Ok(())) => Ok(Self {
-                stop,
-                worker: Some(worker),
-            }),
-            Ok(Err(error)) => {
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(error) => {
-                let _ = stop.send(());
-                drop(worker);
-                Err(format!(
-                    "Backdrop capture initialization timed out: {error}"
-                ))
-            }
-        }
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
     }
 }
 impl Drop for CaptureService {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.stop.send(true);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            // The capture worker owns teardown; the UI never waits for its GPU.
+            drop(worker);
         }
     }
 }
@@ -125,12 +144,15 @@ struct Session {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     handler: Option<i64>,
+    readback: Option<Arc<Mutex<Readback>>>,
+    notify: Option<Arc<dyn Fn(BackdropFrame) + Send + Sync>>,
 }
 impl Session {
     fn new(
         rect: (i32, i32, u32, u32),
         monitor_handle: isize,
         notify: Arc<dyn Fn(BackdropFrame) + Send + Sync>,
+        wake: Sender<bool>,
     ) -> Result<Self, String> {
         let setup = || -> windows::core::Result<Self> {
             if !GraphicsCaptureSession::IsSupported()? {
@@ -166,9 +188,7 @@ impl Session {
             let mut context = None;
             // SAFETY: D3D output pointers refer to initialized stack Options.
             // BGRA support is required by the WinRT capture-surface bridge.
-            // Only cropped copies use this device; optical rendering is bounded
-            // separately. Prefer the lower-memory device by default and retain
-            // a hardware override for measured driver comparisons.
+            // Hardware capture is preferred; software is an event-driven fallback.
             unsafe {
                 let create =
                     |driver,
@@ -186,17 +206,8 @@ impl Session {
                             Some(context),
                         )
                     };
-                let hardware = std::env::args().any(|arg| arg == "--capture-hardware");
-                let preferred = if hardware {
-                    D3D_DRIVER_TYPE_HARDWARE
-                } else {
-                    D3D_DRIVER_TYPE_WARP
-                };
-                let fallback = if hardware {
-                    D3D_DRIVER_TYPE_WARP
-                } else {
-                    D3D_DRIVER_TYPE_HARDWARE
-                };
+                let preferred = D3D_DRIVER_TYPE_HARDWARE;
+                let fallback = D3D_DRIVER_TYPE_WARP;
                 if create(preferred, &mut device, &mut context).is_err() {
                     device = None;
                     context = None;
@@ -228,6 +239,8 @@ impl Session {
                 pool,
                 session,
                 handler: None,
+                readback: None,
+                notify: None,
             };
             resources.session.SetIsCursorCaptureEnabled(false)?;
             // No consent request or security setting is changed. If system policy
@@ -248,38 +261,83 @@ impl Session {
             let _ = resources.session.SetDirtyRegionMode(
                 windows::Graphics::Capture::GraphicsCaptureDirtyRegionMode::ReportOnly,
             );
-            let mut staging = None;
+            let mut mip = 0u32;
+            while (rect.2 >> mip).max(1) as u64 * (rect.3 >> mip).max(1) as u64 > 262_144 {
+                mip += 1;
+            }
+            let width = (rect.2 >> mip).max(1);
+            let height = (rect.3 >> mip).max(1);
+            let mut roi = None;
             let description = D3D11_TEXTURE2D_DESC {
                 Width: rect.2,
                 Height: rect.3,
-                MipLevels: 1,
+                MipLevels: mip + 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
                 },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
+                ..Default::default()
             };
-            // SAFETY: valid single-subresource CPU-read staging texture descriptor.
             unsafe {
-                device.CreateTexture2D(&description, None, Some(&mut staging))?;
+                device.CreateTexture2D(&description, None, Some(&mut roi))?;
+            }
+            let roi = roi.ok_or_else(windows::core::Error::empty)?;
+            let mut view = None;
+            unsafe {
+                device.CreateShaderResourceView(&roi, None, Some(&mut view))?;
+            }
+            let view = view.ok_or_else(windows::core::Error::empty)?;
+            let mut slots = Vec::with_capacity(3);
+            for _ in 0..3 {
+                let mut texture = None;
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    ..Default::default()
+                };
+                unsafe {
+                    device.CreateTexture2D(&desc, None, Some(&mut texture))?;
+                }
+                slots.push(Slot {
+                    texture: texture.ok_or_else(windows::core::Error::empty)?,
+                    pending: None,
+                });
             }
             let readback = Arc::new(Mutex::new(Readback {
                 _device: device,
                 context,
-                staging: staging.ok_or_else(windows::core::Error::empty)?,
+                roi,
+                view,
+                mip,
+                slots,
                 left: left as u32,
                 top: top as u32,
-                width: rect.2,
-                height: rect.3,
-                scratch: vec![0; rect.2 as usize * rect.3 as usize * 4],
+                crop_width: rect.2,
+                crop_height: rect.3,
+                width,
+                height,
                 last: Vec::new(),
                 last_read: None,
+                serial: 0,
+                delivered: 0,
+                failure: None,
             }));
+            resources.readback = Some(readback.clone());
+            resources.notify = Some(notify.clone());
             let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
                 move |pool, _| {
                     let Some(pool) = pool.as_ref() else {
@@ -289,10 +347,18 @@ impl Session {
                         return Ok(());
                     };
                     let frame = FrameLease(frame);
-                    let image = readback
-                        .lock()
-                        .ok()
-                        .and_then(|mut state| state.read(&frame.0).ok().flatten());
+                    let image =
+                        readback
+                            .lock()
+                            .ok()
+                            .and_then(|mut state| match state.read(&frame.0) {
+                                Ok(image) => image,
+                                Err(error) => {
+                                    state.failure = Some(error);
+                                    None
+                                }
+                            });
+                    let _ = wake.send(false);
                     // Return the frame before invoking application code. The callback
                     // may enqueue a GUI event but must not block this WGC worker.
                     drop(frame);
@@ -324,144 +390,184 @@ impl Drop for FrameLease {
         let _ = self.0.Close();
     }
 }
+struct Slot {
+    texture: ID3D11Texture2D,
+    pending: Option<(u64, Instant)>,
+}
 struct Readback {
     _device: ID3D11Device,
     context: ID3D11DeviceContext,
-    staging: ID3D11Texture2D,
+    roi: ID3D11Texture2D,
+    view: ID3D11ShaderResourceView,
+    mip: u32,
+    slots: Vec<Slot>,
     left: u32,
     top: u32,
+    crop_width: u32,
+    crop_height: u32,
     width: u32,
     height: u32,
-    scratch: Vec<u8>,
     last: Vec<u8>,
     last_read: Option<Instant>,
+    serial: u64,
+    delivered: u64,
+    failure: Option<windows::core::Error>,
 }
 impl Readback {
-    fn read(
-        &mut self,
-        frame: &Direct3D11CaptureFrame,
-    ) -> windows::core::Result<Option<BackdropFrame>> {
-        let size = frame.ContentSize()?;
-        if self.left + self.width > size.Width.max(0) as u32
-            || self.top + self.height > size.Height.max(0) as u32
-        {
-            return Ok(None);
+    /// Nonblocking staging maps are confined to the capture worker. A final queued
+    /// frame is drained by a finite worker wakeup even when WGC stops raising events.
+    fn poll(&mut self) -> windows::core::Result<Option<BackdropFrame>> {
+        if let Some(error) = self.failure.take() {
+            return Err(error);
         }
-        if !self.last.is_empty()
-            && let Ok(regions) = frame.DirtyRegions()
-        {
-            let mut overlaps = false;
-            for i in 0..regions.Size()? {
-                let region = regions.GetAt(i)?;
-                if region.X < (self.left + self.width) as i32
-                    && region.Y < (self.top + self.height) as i32
-                    && region.X + region.Width > self.left as i32
-                    && region.Y + region.Height > self.top as i32
-                {
-                    overlaps = true;
-                    break;
+        let mut newest = None;
+        for slot in &mut self.slots {
+            let Some((serial, queued)) = slot.pending else {
+                continue;
+            };
+            if queued.elapsed() > Duration::from_millis(500) {
+                slot.pending = None;
+                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                    0x800705B4u32 as i32,
+                )));
+            }
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            let result = unsafe {
+                self.context.Map(
+                    &slot.texture,
+                    0,
+                    D3D11_MAP_READ,
+                    D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
+                    Some(&mut mapped),
+                )
+            };
+            if let Err(error) = result {
+                if error.code() == windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAS_STILL_DRAWING {
+                    continue;
                 }
+                slot.pending = None;
+                return Err(error);
             }
-            if !overlaps {
-                return Ok(None);
+            slot.pending = None;
+            if serial > self.delivered
+                && !mapped.pData.is_null()
+                && mapped.RowPitch >= self.width * 4
+            {
+                let mut pixels = vec![0; self.width as usize * self.height as usize * 4];
+                for y in 0..self.height as usize {
+                    let row = unsafe {
+                        std::slice::from_raw_parts(
+                            (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
+                            self.width as usize * 4,
+                        )
+                    };
+                    for (bgra, rgba) in row.as_chunks::<4>().0.iter().zip(
+                        pixels[y * self.width as usize * 4..(y + 1) * self.width as usize * 4]
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut(),
+                    ) {
+                        rgba.copy_from_slice(&[bgra[2], bgra[1], bgra[0], 255]);
+                    }
+                }
+                self.delivered = serial;
+                newest = Some(pixels);
+            }
+            unsafe {
+                self.context.Unmap(&slot.texture, 0);
             }
         }
-        // Maintain the same 30fps ceiling on older Windows builds without the
-        // optional MinUpdateInterval property. This checks frame events; it never
-        // schedules a wakeup and does not affect the independent morph timer.
-        if self
-            .last_read
-            .is_some_and(|last| last.elapsed() < Duration::from_millis(33))
-        {
+        let Some(pixels) = newest else {
             return Ok(None);
-        }
-        self.last_read = Some(Instant::now());
-        let surface = frame.Surface()?;
-        let interop: IDirect3DDxgiInterfaceAccess = surface.cast()?;
-        // SAFETY: the capture surface's DXGI interface is a texture valid only
-        // until FrameLease closes it. No reference escapes this synchronous read.
-        let texture: ID3D11Texture2D = unsafe { interop.GetInterface()? };
-        let mut texture_description = D3D11_TEXTURE2D_DESC::default();
-        // ContentSize can lead the backing texture during display reconfiguration.
-        // Check the actual resource too, so CopySubresourceRegion stays in bounds.
-        unsafe {
-            texture.GetDesc(&mut texture_description);
-        }
-        if self.left + self.width > texture_description.Width
-            || self.top + self.height > texture_description.Height
-        {
-            return Ok(None);
-        }
-        let source_box = D3D11_BOX {
-            left: self.left,
-            top: self.top,
-            front: 0,
-            right: self.left + self.width,
-            bottom: self.top + self.height,
-            back: 1,
         };
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: a mutex serializes this immediate context, the source box is
-        // within ContentSize, and staging dimensions exactly match the crop.
-        unsafe {
-            self.context.CopySubresourceRegion(
-                &self.staging,
-                0,
-                0,
-                0,
-                0,
-                &texture,
-                0,
-                Some(&source_box),
-            );
-            self.context
-                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-            let row_bytes = self.width as usize * 4;
-            if mapped.pData.is_null() || mapped.RowPitch < row_bytes as u32 {
-                self.context.Unmap(&self.staging, 0);
-                return Ok(None);
-            }
-            // A successful Map guarantees RowPitch*Height readable bytes until
-            // Unmap. Only Width*4 bytes of each padded row are inspected.
-            for y in 0..self.height as usize {
-                let row = std::slice::from_raw_parts(
-                    (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
-                    row_bytes,
-                );
-                let output = &mut self.scratch[y * row_bytes..(y + 1) * row_bytes];
-                for (bgra, rgba) in row
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(output.as_chunks_mut::<4>().0)
-                {
-                    rgba.copy_from_slice(&[bgra[2], bgra[1], bgra[0], 255]);
-                }
-            }
-            self.context.Unmap(&self.staging, 0);
-        }
-        // Ignore tiny compositor/noise changes instead of rebuilding the entire
-        // optical image for a handful of pixels. Compare with the last accepted
-        // frame, so larger slow changes accumulate until they become visible.
-        if self.last.len() == self.scratch.len() {
-            let substantial_pixels = self
+        // A bounded digest on the capture worker avoids any UI-thread pixel comparison.
+        if self.last.len() == pixels.len()
+            && self
                 .last
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .zip(self.scratch.as_chunks::<4>().0)
-                .filter(|(old, new)| (0..3).any(|channel| old[channel].abs_diff(new[channel]) > 3))
-                .take(32)
-                .count();
-            if substantial_pixels < 32 {
-                return Ok(None);
-            }
+                .step_by(7)
+                .zip(pixels.as_chunks::<4>().0.iter().step_by(7))
+                .all(|(a, b)| (0..3).all(|i| a[i].abs_diff(b[i]) <= 2))
+        {
+            return Ok(None);
         }
-        self.last.clone_from(&self.scratch);
+        self.last.clone_from(&pixels);
         Ok(Some(BackdropFrame {
             width: self.width,
             height: self.height,
-            pixels: self.scratch.clone(),
+            pixels,
         }))
+    }
+    fn read(
+        &mut self,
+        frame: &Direct3D11CaptureFrame,
+    ) -> windows::core::Result<Option<BackdropFrame>> {
+        let completed = self.poll()?;
+        if self
+            .last_read
+            .is_some_and(|last| last.elapsed() < Duration::from_millis(33))
+        {
+            return Ok(completed);
+        }
+        if self.serial > 0
+            && let Ok(regions) = frame.DirtyRegions()
+        {
+            let mut overlap = false;
+            for i in 0..regions.Size()? {
+                let r = regions.GetAt(i)?;
+                overlap |= r.X < (self.left + self.crop_width) as i32
+                    && r.Y < (self.top + self.crop_height) as i32
+                    && r.X + r.Width > self.left as i32
+                    && r.Y + r.Height > self.top as i32;
+            }
+            if !overlap {
+                return Ok(completed);
+            }
+        }
+        let Some(slot) = self.slots.iter_mut().find(|slot| slot.pending.is_none()) else {
+            return Ok(completed);
+        };
+        let surface = frame.Surface()?;
+        let interop: IDirect3DDxgiInterfaceAccess = surface.cast()?;
+        let texture: ID3D11Texture2D = unsafe { interop.GetInterface()? };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut desc);
+        }
+        if self.left + self.crop_width > desc.Width || self.top + self.crop_height > desc.Height {
+            return Ok(completed);
+        }
+        let source = D3D11_BOX {
+            left: self.left,
+            top: self.top,
+            front: 0,
+            right: self.left + self.crop_width,
+            bottom: self.top + self.crop_height,
+            back: 1,
+        };
+        unsafe {
+            self.context
+                .CopySubresourceRegion(&self.roi, 0, 0, 0, 0, &texture, 0, Some(&source));
+            if self.mip > 0 {
+                self.context.GenerateMips(&self.view);
+            }
+            self.context.CopySubresourceRegion(
+                &slot.texture,
+                0,
+                0,
+                0,
+                0,
+                &self.roi,
+                self.mip,
+                None,
+            );
+            self.context.Flush();
+        }
+        self.serial += 1;
+        slot.pending = Some((self.serial, Instant::now()));
+        self.last_read = Some(Instant::now());
+        Ok(completed)
     }
 }

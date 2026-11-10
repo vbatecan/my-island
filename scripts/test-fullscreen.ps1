@@ -1,7 +1,8 @@
 param(
     [switch]$Fixture,[string]$ControlDirectory,[switch]$SkipHover,[switch]$TraceHover,
     [ValidateSet('Auto','Hide','Show')][string]$FullscreenOverride='Auto',
-    [string]$MonitorId='', [switch]$AllMonitors
+    [string]$MonitorId='', [switch]$AllMonitors,
+    [ValidateSet('debug','release')][string]$Configuration='release'
 )
 $ErrorActionPreference='Stop'
 if($Fixture){
@@ -83,7 +84,7 @@ public static class IslandFullscreenFixture {
 }
 
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$executable=Join-Path $workspace 'target\release\still-island.exe'
+$executable=Join-Path $workspace "target\$Configuration\still-island.exe"
 if(-not (Test-Path -LiteralPath $executable)){throw 'Build the release executable first.'}
 if(Get-Process still-island -ErrorAction SilentlyContinue){throw 'Exit the existing island before this test; other instances are never stopped.'}
 Add-Type -TypeDefinition @'
@@ -214,7 +215,7 @@ if($AllMonitors){
     $summary=@()
     $shell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     foreach($monitor in $monitors){
-        $childArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-MonitorId',$monitor.Device,'-FullscreenOverride',$FullscreenOverride)
+        $childArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-MonitorId',$monitor.Device,'-FullscreenOverride',$FullscreenOverride,'-Configuration',$Configuration)
         if($SkipHover){$childArguments+='-SkipHover'}
         if($TraceHover){$childArguments+='-TraceHover'}
         & $shell @childArguments
@@ -294,7 +295,7 @@ try {
     $centered=[math]::Abs($expectedCenter-$actualCenter) -le 2 -and [math]::Abs($position.Top-[int]$selectedMonitor.Top) -le 2
     $results += [pscustomobject]@{Stage='selected-monitor-position';ExpectedVisible=$true;ActualVisible=[IslandFullscreenProbe]::IsWindowVisible($overlay);Pass=$centered;Detail="device=$($selectedMonitor.Device); expected center=$expectedCenter; actual=$actualCenter; dpi=$($selectedMonitor.DpiX)"}
     if(-not $centered){throw 'Overlay was not centered on the explicitly selected monitor.'}
-    if($FullscreenOverride -ne 'Hide' -and -not [IslandFullscreenProbe]::IsWindowVisible($overlay)){throw 'Overlay was initially hidden; close any existing fullscreen application before this test.'}
+    if(-not $SkipHover -and $FullscreenOverride -ne 'Hide' -and -not [IslandFullscreenProbe]::IsWindowVisible($overlay)){throw 'Overlay was initially hidden; close any existing fullscreen or maximized application before the hover test.'}
     # Create an explicit fresh outside-to-inside input edge after placement.
     if(-not $SkipHover -and $FullscreenOverride -eq 'Auto'){
     $bounds=New-Object IslandFullscreenProbe+Rect
@@ -384,12 +385,13 @@ try {
         $null=[IslandFullscreenProbe]::SetCursorPos($hoverX,$outsideY)
         Wait-StableFixturePointer $hoverX $outsideY 1400
     }
-    $stages=@(@{Name='normal';Visible=$true},@{Name='maximized';Visible=$true},@{Name='fullscreen';Visible=$false},@{Name='restore';Visible=$true})
+    $stages=@(@{Name='normal';Visible=$true},@{Name='maximized';Visible=$false},@{Name='fullscreen';Visible=$false},@{Name='restore';Visible=$true})
     foreach($stage in $stages){
         if($FullscreenOverride -eq 'Hide'){$stage.Visible=$false}
         elseif($FullscreenOverride -eq 'Show'){$stage.Visible=$true}
         $fixtureWindow=Send-FixtureCommand $stage.Name
         if([IslandFullscreenProbe]::GetForegroundWindow() -ne $fixtureWindow){
+            if($SkipHover){throw 'INCONCLUSIVE: owned fixture did not obtain foreground; no input was injected.'}
             if(-not [IslandFullscreenProbe]::ClickOwnedFixture($fixtureWindow,$fixtureProcess.Id)){
                 throw 'Fixture is not the verified click target; no focus click was sent and result is inconclusive.'
             }
@@ -419,7 +421,7 @@ try {
 }finally{
     $foreground=[IslandFullscreenProbe]::GetForegroundWindow()
     $restoreFocus=($foreground -eq $fixtureWindow -or $foreground -eq $overlay)
-    $null=[IslandFullscreenProbe]::SetCursorPos($savedPointer.X,$savedPointer.Y)
+    if(-not $SkipHover){$null=[IslandFullscreenProbe]::SetCursorPos($savedPointer.X,$savedPointer.Y)}
     if($previousDpi -ne [IntPtr]::Zero){$null=[IslandFullscreenProbe]::SetThreadDpiAwarenessContext($previousDpi)}
     if($fixtureProcess -and -not $fixtureProcess.HasExited){
         Set-Content -LiteralPath (Join-Path $root 'command.txt') -Value 'quit'

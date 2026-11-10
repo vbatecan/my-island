@@ -28,6 +28,7 @@ const REPOSITION: u32 = WM_APP + 32;
 const BACKDROP_REFRESH: u32 = WM_APP + 33;
 const DESKTOP_POLICY: u32 = WM_APP + 34;
 const CLOSE_PANEL: u32 = WM_APP + 35;
+const EDGE_HOVER: u32 = WM_APP + 36;
 const HOTKEY: i32 = 0x5354;
 const LAUNCHER_HOTKEY: i32 = 0x5360;
 const SUBCLASS: usize = 0x4f524249;
@@ -45,7 +46,8 @@ pub enum Event {
     ClosePanel,
     HotkeyToggle,
     LauncherToggle,
-    DesktopPolicyChanged(bool),
+    EdgeHover(bool),
+    DesktopPolicyChanged { covered: bool, locked: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +104,9 @@ struct Native {
     mouse_hook: HHOOK,
     keyboard_hook: HHOOK,
     hidden: bool,
+    desktop_covered: bool,
+    edge_inside: bool,
+    edge_bounds: RECT,
     locked: bool,
 }
 thread_local! { static NATIVE: RefCell<Native> = RefCell::new(Native::default()); }
@@ -111,7 +116,18 @@ pub fn initialize() -> Result<InstanceGuard, String> {
     // SAFETY: invoked on the main thread before Slint constructs any HWND.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let mutex = CreateMutexW(None, false, w!("Local\\StillIsland.Singleton"))
+        // Explicit verification fixtures own a separate process/window and never
+        // displace or send input to an existing user instance.
+        let isolated = crate::app::verification_isolated_material();
+        let name: Vec<u16> = if isolated {
+            format!("Local\\StillIsland.MaterialProbe.{}", std::process::id())
+        } else {
+            "Local\\StillIsland.Singleton".into()
+        }
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+        let mutex = CreateMutexW(None, false, windows::core::PCWSTR(name.as_ptr()))
             .map_err(|e| e.to_string())?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(mutex);
@@ -409,7 +425,11 @@ fn refresh_input_hooks() -> Result<(), String> {
     let (mouse_needed, keyboard_needed, mouse, keyboard) = NATIVE.with(|n| {
         let n = n.borrow();
         (
-            n.panel_open && (n.outside_click_collapse || n.keyboard_mode) && !n.hidden,
+            !n.locked
+                && (n.desktop_covered
+                    || (n.panel_open
+                        && (n.outside_click_collapse || n.keyboard_mode)
+                        && !n.hidden)),
             n.panel_open && !n.keyboard_mode && !n.hidden,
             n.mouse_hook,
             n.keyboard_hook,
@@ -443,7 +463,26 @@ fn refresh_input_hooks() -> Result<(), String> {
 unsafe extern "system" fn mouse_input(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: Windows supplies MSLLHOOKSTRUCT only for nonnegative hook codes.
     unsafe {
+        if code >= 0 && w.0 as u32 == WM_MOUSEMOVE {
+            let point = (*(l.0 as *const MSLLHOOKSTRUCT)).pt;
+            let edge = NATIVE.with(|n| {
+                let mut n = n.borrow_mut();
+                let inside = n.desktop_covered && !n.locked && at_top_edge(point, n.edge_bounds);
+                if inside == n.edge_inside {
+                    return None;
+                }
+                n.edge_inside = inside;
+                Some((n.hwnd, inside))
+            });
+            if let Some((hwnd, inside)) = edge {
+                let _ = PostMessageW(Some(hwnd), EDGE_HOVER, WPARAM(inside as usize), LPARAM(0));
+            }
+        }
         if code >= 0
+            && NATIVE.with(|n| {
+                let n = n.borrow();
+                n.panel_open && !n.hidden && (n.outside_click_collapse || n.keyboard_mode)
+            })
             && matches!(
                 w.0 as u32,
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
@@ -457,6 +496,33 @@ unsafe extern "system" fn mouse_input(code: i32, w: WPARAM, l: LPARAM) -> LRESUL
             }
         }
         CallNextHookEx(None, code, w, l)
+    }
+}
+fn at_top_edge(point: POINT, bounds: RECT) -> bool {
+    bounds.right > bounds.left
+        && bounds.bottom > bounds.top
+        && point.x >= bounds.left
+        && point.x < bounds.right
+        && point.y >= bounds.top
+        && point.y < bounds.top + 2
+}
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    #[test]
+    fn top_edge_is_limited_to_selected_monitor_and_supports_negative_origins() {
+        let bounds = RECT {
+            left: -1920,
+            top: -1080,
+            right: 0,
+            bottom: 0,
+        };
+        assert!(at_top_edge(POINT { x: -1920, y: -1080 }, bounds));
+        assert!(at_top_edge(POINT { x: -1, y: -1079 }, bounds));
+        assert!(!at_top_edge(POINT { x: 0, y: -1080 }, bounds));
+        assert!(!at_top_edge(POINT { x: -100, y: -1078 }, bounds));
+        assert!(!at_top_edge(POINT { x: -100, y: -1081 }, bounds));
+        assert!(!at_top_edge(POINT { x: 0, y: 0 }, RECT::default()));
     }
 }
 unsafe extern "system" fn keyboard_input(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -491,11 +557,18 @@ pub fn prefers_reduced_motion() -> bool {
 pub fn notification_allowed() -> bool {
     let unavailable = NATIVE.with(|n| {
         let n = n.borrow();
-        n.hidden || n.locked
+        n.locked
     });
     !unavailable
         && unsafe {
-            SHQueryUserNotificationState().is_ok_and(|state| state == QUNS_ACCEPTS_NOTIFICATIONS)
+            SHQueryUserNotificationState().is_ok_and(|state| {
+                matches!(
+                    state,
+                    QUNS_ACCEPTS_NOTIFICATIONS
+                        | QUNS_RUNNING_D3D_FULL_SCREEN
+                        | QUNS_PRESENTATION_MODE
+                )
+            })
         }
 }
 
@@ -533,7 +606,8 @@ fn refresh_desktop_policy() {
     // Query actual foreground/owner and monitor surfaces, not the last window
     // event's source. A background fullscreen surface on another monitor still
     // needs protection when keyboard focus moves away from that monitor.
-    let covered = super::display::selected(&id).is_some_and(|(monitor, info)| unsafe {
+    let selected = super::display::selected(&id);
+    let covered = selected.is_some_and(|(monitor, info)| unsafe {
         monitor_has_fullscreen(
             hwnd,
             monitor,
@@ -543,17 +617,33 @@ fn refresh_desktop_policy() {
             &always_show,
         )
     });
-    let hidden = locked || covered;
-    if hidden != was_hidden {
-        NATIVE.with(|n| n.borrow_mut().hidden = hidden);
-        unsafe {
-            let _ = ShowWindow(hwnd, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
+    NATIVE.with(|n| {
+        let mut n = n.borrow_mut();
+        n.desktop_covered = covered;
+        n.edge_bounds = selected.map(|(_, info)| info.rcMonitor).unwrap_or_default();
+        if !covered || locked {
+            n.edge_inside = false;
         }
-        let _ = refresh_input_hooks();
+    });
+    let _ = refresh_input_hooks();
+    if locked {
+        set_overlay_visible(false);
     }
-    // Even unchanged policy may accompany an external window moving beneath a
-    // stationary pointer. The GUI can reconcile its pointer without polling.
-    emit(Event::DesktopPolicyChanged(hidden));
+    let _ = was_hidden;
+    emit(Event::DesktopPolicyChanged { covered, locked });
+}
+
+/// Actual visibility is independent of fullscreen policy during event previews.
+pub fn set_overlay_visible(visible: bool) {
+    let (hwnd, hidden) = NATIVE.with(|n| {
+        let mut n = n.borrow_mut();
+        n.hidden = !visible || n.locked;
+        (n.hwnd, n.hidden)
+    });
+    unsafe {
+        let _ = ShowWindow(hwnd, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
+    }
+    let _ = refresh_input_hooks();
 }
 
 /// Explicit per-executable compatibility overrides. Session lock always wins.
@@ -662,6 +752,7 @@ fn intersects_monitor(surface: RECT, monitor: RECT) -> bool {
 struct FullscreenQuery {
     overlay: HWND,
     monitor: RECT,
+    monitor_handle: HMONITOR,
     foreground_owner: HWND,
     foreground_on_monitor: bool,
     own_process: u32,
@@ -734,6 +825,14 @@ unsafe extern "system" fn fullscreen_candidate(candidate: HWND, data: LPARAM) ->
         if !query.automatic {
             return BOOL(continue_search as i32);
         }
+        // A maximized app owns the usable display even with a visible taskbar.
+        // Per-app overrides above still take precedence.
+        if IsZoomed(candidate).as_bool()
+            && MonitorFromWindow(candidate, MONITOR_DEFAULTTONULL) == query.monitor_handle
+        {
+            query.covered = true;
+            return BOOL(0);
+        }
         if !covers_monitor(outer, query.monitor) {
             return BOOL(continue_search as i32);
         }
@@ -775,11 +874,15 @@ unsafe fn monitor_has_fullscreen(
     // SAFETY: all queries are read-only and EnumWindows retains no callback state.
     unsafe {
         let foreground = GetForegroundWindow();
-        let foreground_on_monitor = !foreground.is_invalid()
+        let mut foreground_process = 0;
+        GetWindowThreadProcessId(foreground, Some(&mut foreground_process));
+        let foreground_on_monitor = foreground_process != GetCurrentProcessId()
+            && !foreground.is_invalid()
             && MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL) == monitor;
         let mut query = FullscreenQuery {
             overlay,
             monitor: bounds,
+            monitor_handle: monitor,
             foreground_owner: GetAncestor(foreground, GA_ROOTOWNER),
             foreground_on_monitor,
             own_process: GetCurrentProcessId(),
@@ -993,6 +1096,10 @@ unsafe extern "system" fn subclass(
             return LRESULT(1);
         }
         match msg {
+            EDGE_HOVER => {
+                emit(Event::EdgeHover(wparam.0 != 0));
+                return LRESULT(0);
+            }
             WM_NCACTIVATE => {
                 // Forward activation to Winit so its focus state stays correct,
                 // but use the documented -1 to prevent DefWindowProc painting

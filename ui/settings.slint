@@ -18,6 +18,7 @@ export component SettingsWindow inherits Window {
     default-font-family: "Segoe UI Variable";
     default-font-size: 13px;
     in-out property <int> appearance-index: 0;
+    in property <image> liquid-preview;
     in-out property <int> form-factor-index: 0;
     in-out property <int> notch-corner-radius: 8;
     in-out property <int> notch-contracted-radius: 8;
@@ -111,15 +112,20 @@ export component SettingsWindow inherits Window {
                     x: 0px; y: 36px; width: parent.width; height: 104px;
                     background: #34343e; border-radius: 8px; clip: true;
                     private property <float> fit: min(0.55 * root.island-scale-percent / 100, (self.width / 1px - 24) / max(root.media-width + 16, root.expanded-width + 16), 88 / max(root.media-height, root.expanded-height));
+                    if root.appearance-index == 5: Image {
+                        x: preview-shape.x; y: preview-shape.y;
+                        width: preview-shape.width; height: preview-shape.height;
+                        source: root.liquid-preview; image-fit: fill;
+                    }
                     preview-shape := Path {
                         x: (parent.width - self.width) / 2; y: 0px;
                         width: root.preview-display-width * preview-card.fit * 1px;
                         height: root.preview-display-height * preview-card.fit * 1px;
                         viewbox-x: 0; viewbox-y: 0; viewbox-width: root.preview-width; viewbox-height: root.preview-height;
-                        commands: root.preview-path; fill: root.appearance-index == 0 ? black : #000000.with-alpha(root.tint); stroke-width: 0px;
+                        commands: root.preview-path; fill: root.appearance-index == 5 ? transparent : root.appearance-index == 0 ? black : #000000.with-alpha(root.tint); stroke-width: 0px;
                     }
                     Text { x: preview-shape.x + 8px; y: max(0px, preview-shape.height / 2 - 12px); width: max(0px, preview-shape.width - 16px); height: 24px;
-                        text: root.preview-state == 0 ? "Still" : "Still Island"; color: white; font-size: (root.preview-state == 0 ? 13px : 18px) * preview-card.fit * root.text-scale-percent / 100;
+                        text: root.preview-state == 0 ? "Still" : "Still Island"; color: root.appearance-index == 5 ? #202024 : white; font-size: (root.preview-state == 0 ? 13px : 18px) * preview-card.fit * root.text-scale-percent / 100;
                         overflow: elide; horizontal-alignment: center; vertical-alignment: center;
                     }
                     Text { x: 12px; y: parent.height - 20px; width: parent.width - 24px; height: 16px; font-size: 10px; color: #d0d0da;
@@ -167,8 +173,8 @@ export component SettingsWindow inherits Window {
                         Note { text: "Contracted corners apply to the idle and compact notch, capped at half its height. Both notch radii default to 8 pixels."; }
                         }
                         Heading { text: "Material"; }
-                        ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
-                        Note { text: root.appearance-index == 4 ? "Live glass follows the desktop. It uses more graphics resources than Eco glass." : root.appearance-index == 3 ? "Eco glass refreshes its backdrop on interaction and display changes." : "Use transparency and tint to balance lightness with readable controls."; }
+                        ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live", "Liquid Glass"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
+                        Note { text: root.appearance-index == 5 ? "Pale glass with live blur, dark controls and polished edges." : root.appearance-index == 4 ? "Live glass follows the desktop. It uses more graphics resources than Eco glass." : root.appearance-index == 3 ? "Eco glass refreshes its backdrop on interaction and display changes." : "Use transparency and tint to balance lightness with readable controls."; }
                         HorizontalLayout {
                             spacing: 12px;
                             Label { text: "Transparency / black tint"; }

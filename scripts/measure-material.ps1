@@ -1,8 +1,8 @@
 # Finite, isolated material/morph probe. Sends no global keyboard or mouse input.
-param([string]$Executable='target/release/still-island.exe',[ValidateSet('solid','acrylic','glass','live-glass')][string]$Appearance='glass',[string]$Label='current',[ValidateSet('default','hardware')][string]$CaptureDriver='default')
+param([string]$Executable='target/release/still-island.exe',[ValidateSet('solid','acrylic','glass','live-glass','liquid-glass')][string]$Appearance='glass',[string]$Label='current',[ValidateSet('default','hardware')][string]$CaptureDriver='default',[switch]$Isolated)
 $ErrorActionPreference='Stop'
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-if(Get-Process still-island -ErrorAction SilentlyContinue){throw 'Exit the running island first; this probe does not stop user processes.'}
+if(-not $Isolated -and (Get-Process still-island -ErrorAction SilentlyContinue)){throw 'Exit the running island first, or use -Isolated; this probe does not stop user processes.'}
 $binary=(Resolve-Path -LiteralPath $Executable).Path
 $run=Join-Path $workspace ('target/material-verification/'+$Label+'-'+$Appearance+'-'+[guid]::NewGuid().ToString('N'))
 $profile=Join-Path $run 'StillIsland'
@@ -18,10 +18,12 @@ fullscreen_hide=false
 launcher_enabled=false
 '@ | Set-Content -LiteralPath (Join-Path $profile 'settings.ini')
 $log=Join-Path $workspace 'verification.log'
+if($Isolated){$log=Join-Path $run 'verification.log'}
 $offset=if(Test-Path $log){@(Get-Content $log).Count}else{0}
 $start=[Diagnostics.ProcessStartInfo]::new($binary)
 $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 $start.WorkingDirectory=$workspace;$start.Arguments='--verify --demo --appearance='+$Appearance
+if($Isolated){$start.WorkingDirectory=$run;$start.Arguments+=' --isolated-material-probe'}
 if($CaptureDriver -eq 'hardware'){$start.Arguments+=' --capture-hardware'}
 $start.EnvironmentVariables['LOCALAPPDATA']=$run
 $application=[Diagnostics.Process]::Start($start)

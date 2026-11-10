@@ -102,7 +102,7 @@ pub(super) fn toggle(app: &Rc<RefCell<App>>) {
         dismiss(app, true);
         return;
     }
-    if app.borrow().hidden || app.borrow().settings_visible {
+    if app.borrow().visibility.locked || app.borrow().settings_visible {
         return;
     }
     {

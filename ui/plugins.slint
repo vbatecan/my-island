@@ -4,6 +4,7 @@ export struct PluginActionEntry { plugin-id:string, id:string, label:string, pin
 export struct PluginConfigEntry { id:string, label:string, kind:string, value:string, checked:bool, choices:[string], choice-index:int }
 export struct PluginVisualNode { id:string, kind:string, text:string, action:string, x:float, y:float, width:float, height:float, value:float, checked:bool, image:image, accent:color, font-size:float, font-weight:int }
 export component PluginView inherits Rectangle {
+    in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     in property <float> text-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
@@ -20,16 +21,16 @@ export component PluginView inherits Rectangle {
         for item in root.nodes : Rectangle {
             x: item.x * root.scaled-pixel; y: item.y * root.scaled-pixel * root.text-scale; width: item.width * root.scaled-pixel; height: item.height * root.scaled-pixel * root.text-scale;
             clip: true;
-            if item.kind == "text" : Text { text: item.text; color: item.accent; font-size: (max(1,item.font-size) * root.scaled-pixel * root.text-scale); font-weight: item.font-weight; wrap: word-wrap; overflow: elide; vertical-alignment: top; }
+            if item.kind == "text" : Text { text: item.text; color: root.light-material ? #202024 : item.accent; font-size: (max(1,item.font-size) * root.scaled-pixel * root.text-scale); font-weight: item.font-weight; wrap: word-wrap; overflow: elide; vertical-alignment: top; }
             if item.kind == "image" : Image { source: item.image; image-fit: contain; }
             if item.kind == "button" : Rectangle {
                 accessible-role: AccessibleRole.button;
                 accessible-label: item.text;
-                border-radius: (5 * root.scaled-pixel); background: touch.pressed ? #ffffff2c : touch.has-hover ? #ffffff20 : #ffffff0e; border-width: root.scaled-pixel; border-color: #ffffff0c;
-                Text { text: item.text; color: white; font-size: (11 * (root.scaled-pixel * root.text-scale)); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                border-radius: (5 * root.scaled-pixel); background: touch.pressed ? (root.light-material ? #0000002c : #ffffff2c) : touch.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #0000000e : #ffffff0e); border-width: root.scaled-pixel; border-color: #ffffff0c;
+                Text { text: item.text; color: (root.light-material ? #202024 : white); font-size: (11 * (root.scaled-pixel * root.text-scale)); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                 touch := TouchArea { mouse-cursor: pointer; clicked => { root.action(item.action, ""); } }
             }
-            if item.kind == "progress" : Rectangle { y: (parent.height - (4 * root.scaled-pixel)) / 2; height: (4 * root.scaled-pixel); background: #ffffff17; border-radius: (2 * root.scaled-pixel);
+            if item.kind == "progress" : Rectangle { y: (parent.height - (4 * root.scaled-pixel)) / 2; height: (4 * root.scaled-pixel); background: (root.light-material ? #00000017 : #ffffff17); border-radius: (2 * root.scaled-pixel);
                 Rectangle { x: 0px; y: 0px; width: parent.width * min(1,max(0,item.value)); height: (4 * root.scaled-pixel); background: item.accent; border-radius: (2 * root.scaled-pixel); }
             }
             if item.kind == "toggle" : CheckBox { font-size: 12 * (root.scaled-pixel * root.text-scale); text: item.text; checked: item.checked; toggled => { root.action(item.action,self.checked ? "true" : "false"); } }
@@ -37,16 +38,17 @@ export component PluginView inherits Rectangle {
             if item.kind == "input" && !root.editable : Rectangle {
                 accessible-role: AccessibleRole.button;
                 accessible-label: "Edit " + item.id;
-                border-radius: (5 * root.scaled-pixel); background: #ffffff14;
-                Text { text: item.text == "" ? "Edit input…" : item.text; color: #ccccd5; font-size: (11 * (root.scaled-pixel * root.text-scale)); overflow: elide; vertical-alignment: center; }
+                border-radius: (5 * root.scaled-pixel); background: (root.light-material ? #00000014 : #ffffff14);
+                Text { text: item.text == "" ? "Edit input…" : item.text; color: (root.light-material ? #202024 : #ccccd5); font-size: (11 * (root.scaled-pixel * root.text-scale)); overflow: elide; vertical-alignment: center; }
                 TouchArea { clicked => { root.edit-requested(); } }
             }
         }
     }
 }
 export component PluginManagerWindow inherits Window {
+    in property <bool> light-material: false;
     title: "Still Island Integrations"; preferred-width: 660px; preferred-height: 720px; min-width: 600px; min-height: 580px;
-    background: #17171b; default-font-family: "Segoe UI Variable"; default-font-size: 12px;
+    background: (root.light-material ? #f0f0f4 : #17171b); default-font-family: "Segoe UI Variable"; default-font-size: 12px;
     in property <[PluginListEntry]> plugins;
     in property <[PluginConfigEntry]> fields;
     in property <[PluginActionEntry]> actions;
@@ -62,8 +64,8 @@ export component PluginManagerWindow inherits Window {
     callback pin-action(string,string,bool); callback invoke(string,string); callback open-view(); callback close-window();
     init => { Palette.color-scheme = dark; }
     VerticalBox { padding: 20px; spacing: 12px;
-        Text { text: "Integrations"; color: white; font-size: 24px; font-weight: 600; vertical-stretch: 0; }
-        Text { text: "Plugins are trusted programs with your Windows account access. Importing does not run them. Enable only programs you trust."; color: #aaaab5; wrap: word-wrap; vertical-stretch: 0; }
+        Text { text: "Integrations"; color: (root.light-material ? #202024 : white); font-size: 24px; font-weight: 600; vertical-stretch: 0; }
+        Text { text: "Plugins are trusted programs with your Windows account access. Importing does not run them. Enable only programs you trust."; color: (root.light-material ? #4b4b54 : #aaaab5); wrap: word-wrap; vertical-stretch: 0; }
         HorizontalBox {
             LineEdit { placeholder-text: "Plugin package (.zip)"; text <=> root.package-path; }
             Button { text: "Browse…"; enabled: !root.busy; clicked => { root.browse(); } }
@@ -74,14 +76,14 @@ export component PluginManagerWindow inherits Window {
                 ScrollView { width: parent.width; height: parent.height;
                     VerticalBox { padding: 0px; spacing: 6px;
                         for item in root.plugins : Button { vertical-stretch: 0; text: item.label + " · " + item.status; clicked => { root.select-plugin(item.id); } }
-                        if root.plugins.length == 0 : Text { text: "No plugins installed"; color: #aaaab5; wrap: word-wrap; }
+                        if root.plugins.length == 0 : Text { text: "No plugins installed"; color: (root.light-material ? #4b4b54 : #aaaab5); wrap: word-wrap; }
                         Rectangle { min-height: 0px; vertical-stretch: 1; }
                     }
                 }
             }
             ScrollView {
                 VerticalBox { padding: 8px; spacing: 9px;
-                    Text { text: root.selected-label == "" ? "Select an integration" : root.selected-label; color: white; font-size: 18px; font-weight: 600; vertical-stretch: 0; }
+                    Text { text: root.selected-label == "" ? "Select an integration" : root.selected-label; color: (root.light-material ? #202024 : white); font-size: 18px; font-weight: 600; vertical-stretch: 0; }
                     if root.selected-id != "" : HorizontalBox {
                         Button { text: "Enable"; clicked => { root.enable-plugin(root.selected-id,true); } }
                         Button { text: "Disable"; clicked => { root.enable-plugin(root.selected-id,false); } }
@@ -89,7 +91,7 @@ export component PluginManagerWindow inherits Window {
                     }
                     for field in root.fields : VerticalBox {
                         spacing: 4px;
-                        Text { text: field.label; color: #d0d0da; vertical-stretch: 0; }
+                        Text { text: field.label; color: (root.light-material ? #202024 : #d0d0da); vertical-stretch: 0; }
                         if field.kind != "bool" && field.kind != "choice" : LineEdit {
                             accessible-label: field.label; text: field.value; input-type: field.kind == "secret" ? InputType.password : InputType.text;
                             placeholder-text: field.kind == "secret" ? "Leave blank to keep saved secret" : "";
@@ -99,15 +101,15 @@ export component PluginManagerWindow inherits Window {
                         if field.kind == "choice" : ComboBox { model: field.choices; current-index: field.choice-index; selected(value) => { root.field-edit(field.id,value); } }
                     }
                     if root.selected-id != "" && root.fields.length > 0 : Button { text: "Save configuration"; clicked => { root.save-config(); } }
-                    Text { text: "Quick actions"; color: #d0d0da; vertical-stretch: 0; }
+                    Text { text: "Quick actions"; color: (root.light-material ? #202024 : #d0d0da); vertical-stretch: 0; }
                     for item in root.actions : CheckBox { text: "Pin " + item.label; checked: item.pinned; toggled => { root.pin-action(item.plugin-id,item.id,self.checked); } }
                     if root.selected-id != "" : Button { text: "Open integration view"; clicked => { root.open-view(); } }
-                    PluginView { height: 190px; nodes: root.nodes; content-height: root.view-height; editable: true; action(id,value) => { root.invoke(id,value); } }
+                    PluginView { light-material: root.light-material; height: 190px; nodes: root.nodes; content-height: root.view-height; editable: true; action(id,value) => { root.invoke(id,value); } }
                     if root.selected-id != "" : Button { enabled: !root.busy; text: "Remove plugin"; clicked => { root.remove-plugin(root.selected-id); } }
                 }
             }
         }
-        Text { text: root.status; color: #bcbcc8; wrap: word-wrap; vertical-stretch: 0; }
+        Text { text: root.status; color: (root.light-material ? #4b4b54 : #bcbcc8); wrap: word-wrap; vertical-stretch: 0; }
         HorizontalBox { Rectangle { horizontal-stretch: 1; } Button { text: "Done"; clicked => { root.close-window(); } } }
     }
 }

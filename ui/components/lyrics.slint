@@ -3,6 +3,7 @@
 export struct LyricRow { text: string, line-index: int }
 
 export component AnimatedLyrics inherits Rectangle {
+    in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     in property <float> text-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
@@ -49,7 +50,7 @@ export component AnimatedLyrics inherits Rectangle {
     Text {
         text: root.destination < 0 ? "Waiting for vocals" : "Instrumental break";
         visible: root.gap-active;
-        color: #90909b;
+        color: (root.light-material ? #4b4b54 : #90909b);
         font-size: 12 * root.scaled-pixel * root.text-scale;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -73,7 +74,7 @@ export component AnimatedLyrics inherits Rectangle {
             width: parent.width;
             height: parent.height - self.y;
             text: line.text;
-            color: white;
+            color: (root.light-material ? #202024 : white);
             font-size: root.font-size-for-line(line.line-index) * 1px;
             font-weight: 500;
             wrap: word-wrap;

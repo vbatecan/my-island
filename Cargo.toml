@@ -1,6 +1,6 @@
 [package]
 name = "still-island"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.92"
 description = "A quiet native Windows island with interruptible spring motion"
@@ -14,6 +14,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 still-island-plugin-protocol = { path = "crates/plugin-protocol" }
 slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "raw-window-handle-06", "unstable-winit-030"] }
 raw-window-handle = "0.6"
+glow = "0.16"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62.2"

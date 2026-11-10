@@ -28,6 +28,7 @@ $results=@()
 foreach($test in @(
     @{Flag='--verify-interactions';Done='interaction verification complete'},
     @{Flag='--verify-layout';Done='layout verification complete'},
+    @{Flag='--verify-illustrations';Done='illustration verification complete'},
     @{Flag='--verify-lyrics';Done='lyrics verification complete'},
     @{Flag='--verify-media-polish';Done='media polish verification complete'}
 )){

@@ -1,7 +1,9 @@
 //! Opt-in regression orchestration kept outside the production UI lifecycle.
 use super::*;
 
-const VERIFICATION_FLAGS: [&str; 12] = [
+const VERIFICATION_FLAGS: [&str; 14] = [
+    "--verify-liquid",
+    "--verify-illustrations",
     "--verify-launcher",
     "--verify",
     "--verify-notifications",
@@ -24,18 +26,15 @@ pub(super) fn enabled() -> bool {
 pub(super) fn blocks_live_input() -> bool {
     enabled() || has_arg("--benchmark")
 }
-pub(super) fn install_metrics(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
-    if app.borrow().verification {
-        let metrics = app.borrow().metrics.clone();
-        if let Err(e) = ui
-            .window()
-            .set_rendering_notifier(move |state, _| metrics.frame(state))
-        {
-            record(&format!("render metrics unavailable: {e:?}"));
-        }
-    }
-}
 pub(super) fn setup(app: &Rc<RefCell<App>>) -> slint::Timer {
+    if has_arg("--verify-liquid") {
+        liquid_verification::setup(app);
+        return slint::Timer::default();
+    }
+    if has_arg("--verify-illustrations") {
+        illustration_verification::setup(app);
+        return slint::Timer::default();
+    }
     if has_arg("--verify-launcher") {
         launcher::setup_verification(app);
         return slint::Timer::default();

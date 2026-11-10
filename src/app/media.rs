@@ -27,6 +27,10 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                 .unwrap_or_else(|e| e.into_inner())
                 .changed(snapshot.artwork.as_deref());
             let _ = weak.upgrade_in_event_loop(move |ui| {
+                let changed = ui.get_track_title() != snapshot.title.as_str()
+                    || ui.get_artist_name() != snapshot.artist.as_str()
+                    || ui.get_playing() != snapshot.playing;
+                ui.set_fullscreen_media_event(changed);
                 apply_media(&ui, &snapshot, artwork_changed);
                 ui.invoke_media_updated();
             });
@@ -81,6 +85,17 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                         .upgrade()
                         .is_some_and(|ui| ui.get_media_available() && ui.get_playing());
                 a.coordinator.set_media(media, now);
+            }
+            let event_ui = app.borrow().ui.upgrade();
+            if let Some(ui) = event_ui
+                && ui.get_fullscreen_media_event()
+            {
+                ui.set_fullscreen_media_event(false);
+                let mut a = app.borrow_mut();
+                if a.settings.compact_now_playing && a.visibility.covered && !a.visibility.locked {
+                    a.visibility.until = Some(a.now() + 3000);
+                    a.visibility.preview = Some(Content::CompactMedia);
+                }
             }
             sync_media_clock(&app);
             sync_presentation(&app);

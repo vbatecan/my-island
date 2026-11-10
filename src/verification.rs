@@ -46,12 +46,15 @@ pub fn snapshot(ui: &crate::IslandWindow, name: &str) -> Result<PathBuf, Box<dyn
         .into());
     }
     let interior = pixel(width / 2, (3.0 * scale).round() as u32);
+    let charging_glow = ui.get_charge_intensity() > 0.;
     if ui.get_appearance() == 0
-        && (interior.a < 250 || interior.r > 3 || interior.g > 3 || interior.b > 3)
+        && (interior.a < 250
+            || (!charging_glow && (interior.r > 3 || interior.g > 3 || interior.b > 3)))
     {
-        return Err(
-            format!("{name}: top-center silhouette is not opaque black: {interior:?}").into(),
-        );
+        return Err(format!(
+            "{name}: top-center silhouette has an invalid solid interior: {interior:?}"
+        )
+        .into());
     }
 
     let mut bounds = (width, height, 0, 0);

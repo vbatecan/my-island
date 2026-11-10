@@ -17,9 +17,12 @@ pub struct Glass {
     revision: u64,
     source_size: (u32, u32),
     unfiltered: Option<Backdrop>,
+    pub liquid_backdrop: Option<Backdrop>,
+    pub liquid_revision: u64,
+    pub palette: crate::liquid::Palette,
     cache: Option<(GlassCacheKey, Image)>,
 }
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct GlassCacheKey {
     width: u32,
     height: u32,
@@ -29,9 +32,25 @@ struct GlassCacheKey {
     canvas_width_bits: u32,
     backdrop_revision: u64,
     form: FormFactor,
-    refractive: bool,
+    profile: OpticalProfile,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpticalProfile {
+    Frosted,
+    Glass,
 }
 impl Glass {
+    pub fn set_liquid_backdrop(&mut self, frame: Backdrop) -> bool {
+        if frame.width == 0
+            || frame.height == 0
+            || frame.pixels.len() != frame.width as usize * frame.height as usize * 4
+        {
+            return false;
+        }
+        self.liquid_backdrop = Some(frame);
+        self.liquid_revision = self.liquid_revision.wrapping_add(1);
+        true
+    }
     pub fn set_backdrop(&mut self, frame: Backdrop) -> bool {
         let Some(mut reduced) = reduced_backdrop(&frame) else {
             return false;
@@ -69,6 +88,7 @@ impl Glass {
     pub fn clear(&mut self) {
         self.backdrop = None;
         self.unfiltered = None;
+        self.liquid_backdrop = None;
         self.source_size = (0, 0);
         self.cache = None;
     }
@@ -100,7 +120,15 @@ impl Glass {
         form: FormFactor,
         canvas_width: f64,
     ) -> Image {
-        self.compose(width, height, radius, scale, form, canvas_width, true)
+        self.compose(
+            width,
+            height,
+            radius,
+            scale,
+            form,
+            canvas_width,
+            OpticalProfile::Glass,
+        )
     }
     pub fn frosted_image_in_canvas(
         &mut self,
@@ -111,7 +139,15 @@ impl Glass {
         form: FormFactor,
         canvas_width: f64,
     ) -> Image {
-        self.compose(width, height, radius, scale, form, canvas_width, false)
+        self.compose(
+            width,
+            height,
+            radius,
+            scale,
+            form,
+            canvas_width,
+            OpticalProfile::Frosted,
+        )
     }
     #[allow(clippy::too_many_arguments)]
     fn compose(
@@ -122,7 +158,7 @@ impl Glass {
         scale: f32,
         form: FormFactor,
         canvas_width: f64,
-        refractive: bool,
+        profile: OpticalProfile,
     ) -> Image {
         // User zoom can reduce the effective pixel scale below one. Preserve the
         // exact capture-to-canvas mapping instead of sampling a larger phantom crop.
@@ -150,7 +186,7 @@ impl Glass {
             canvas_width_bits: canvas_width.to_bits(),
             backdrop_revision: self.revision,
             form,
-            refractive,
+            profile,
         };
         if let Some((old, image)) = &self.cache
             && *old == key
@@ -181,7 +217,7 @@ impl Glass {
                 if coverage <= 0. {
                     continue;
                 }
-                let (dx, dy, reflection) = if !refractive {
+                let (dx, dy, reflection) = if profile == OpticalProfile::Frosted {
                     (0., 0., 0.)
                 } else if -d >= bezel {
                     // A flat center has normal(0,0,1), no displacement, and
@@ -210,7 +246,8 @@ impl Glass {
                     let reflection = (fresnel * 0.55 + light.powi(18) * 0.16) * coverage;
                     (dx, dy, reflection)
                 };
-                let pixel = if let Some(frame) = &self.backdrop {
+                let backdrop = &self.backdrop;
+                let pixel = if let Some(frame) = backdrop {
                     // Map optical pixels through logical canvas space into the
                     // original capture, then into the reduced backdrop. DPI and
                     // user zoom must not shift the sampled desktop crop.

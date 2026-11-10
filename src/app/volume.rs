@@ -68,6 +68,10 @@ pub(super) fn feedback(app: &Rc<RefCell<App>>) {
     let mut a = app.borrow_mut();
     let now = a.now();
     a.coordinator.volume(now);
+    if a.visibility.covered && !a.visibility.locked {
+        a.visibility.until = Some(now + 3000);
+        a.visibility.preview = Some(Content::Volume);
+    }
     drop(a);
     sync_presentation(app);
 }

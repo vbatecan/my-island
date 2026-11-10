@@ -66,7 +66,14 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                             a.coordinator.clear_notifications(now);
                         }
                     }
-                    NotificationEvent::Removed(id) => a.coordinator.remove(id, now),
+                    NotificationEvent::Removed(id) => {
+                        a.coordinator.remove(id, now);
+                        if matches!(&a.visibility.preview, Some(Content::Notification(record, _)) if record.id == id) {
+                            a.visibility.preview = None;
+                            a.visibility.until = None;
+                            a.visibility.remaining = None;
+                        }
+                    },
                     NotificationEvent::Added(record) | NotificationEvent::Updated(record) => {
                         if !a.observed_apps.iter().any(|(id, _)| id == &record.app_id) {
                             a.observed_apps

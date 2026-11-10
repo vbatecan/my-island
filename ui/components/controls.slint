@@ -1,5 +1,6 @@
 // Shared island controls. Animation and application state remain in the host.
 export component TextButton inherits Rectangle {
+    in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     in property <float> text-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
@@ -8,25 +9,28 @@ export component TextButton inherits Rectangle {
     callback clicked();
     callback interaction(bool);
     border-radius: (5 * root.scaled-pixel);
-    background: !root.enabled ? #ffffff0a : button.pressed ? #ffffff36 : button.has-hover ? #ffffff28 : #ffffff12;
+    background: !root.enabled ? (root.light-material ? #0000000a : #ffffff0a) : button.pressed ? (root.light-material ? #00000036 : #ffffff36) : button.has-hover ? (root.light-material ? #00000028 : #ffffff28) : (root.light-material ? #00000012 : #ffffff12);
     accessible-role: AccessibleRole.button;
     accessible-label: root.label;
     opacity: root.enabled ? 1 : 0.35;
-    Text { text: root.label; color: white; font-size: (11 * root.scaled-pixel * root.text-scale); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+    Text { text: root.label; color: (root.light-material ? #202024 : white); font-size: (11 * root.scaled-pixel * root.text-scale); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
     button := TouchArea { enabled: root.enabled; mouse-cursor: pointer; changed pressed => { root.interaction(self.pressed); } clicked => { root.clicked(); } }
 }
 
 export component Glyph inherits Text {
+    in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
     font-family: "Segoe Fluent Icons";
     font-size: (18 * root.scaled-pixel);
-    color: white;
+    color: (root.light-material ? #202024 : white);
     horizontal-alignment: center;
     vertical-alignment: center;
 }
 
 export component QuietButton inherits Rectangle {
+    in property <bool> light-material: false;
+    in property <bool> filled: false;
     in property <float> ui-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
     in property <string> glyph;
@@ -38,11 +42,11 @@ export component QuietButton inherits Rectangle {
     width: (32 * root.scaled-pixel);
     height: (28 * root.scaled-pixel);
     border-radius: self.height / 2;
-    background: !root.enabled ? transparent : pointer.pressed ? #ffffff30 : pointer.has-hover ? #ffffff20 : root.active ? #ffffff24 : transparent;
+    background: root.filled ? #151517 : !root.enabled ? transparent : pointer.pressed ? (root.light-material ? #00000030 : #ffffff30) : pointer.has-hover ? (root.light-material ? #00000020 : #ffffff20) : root.active ? (root.light-material ? #00000024 : #ffffff24) : transparent;
     opacity: root.enabled ? 1 : 0.3;
     accessible-role: AccessibleRole.button;
     accessible-label: root.label;
-    Glyph { ui-scale: root.ui-scale; text: root.glyph; font-size: (15 * root.scaled-pixel); }
+    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; text: root.glyph; font-size: (15 * root.scaled-pixel); }
     pointer := TouchArea {
         enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
@@ -53,6 +57,7 @@ export component QuietButton inherits Rectangle {
 
 // Finite playback-state crossfade; no clock or animation remains active at rest.
 export component PlaybackButton inherits QuietButton {
+    filled: root.light-material;
     in property <bool> playing: false;
     in property <bool> motion-enabled: true;
     in property <float> motion-speed: 1;
@@ -63,18 +68,19 @@ export component PlaybackButton inherits QuietButton {
     changed playing => { self.glyph-mix = self.playing ? 1 : 0; }
     changed motion-enabled => { if !self.motion-enabled { self.step-animated = false; self.glyph-mix = self.playing ? 1 : 0; } else { self.step-animated = true; } }
     animate glyph-mix { duration: root.motion-enabled && root.step-animated ? 150ms / min(2, max(0.5, root.motion-speed)) : 0ms; easing: ease-out; }
-    Glyph { ui-scale: root.ui-scale; text: "\u{e768}"; opacity: 1 - root.glyph-mix; }
-    Glyph { ui-scale: root.ui-scale; text: "\u{e769}"; opacity: root.glyph-mix; }
+    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; color: white; text: "\u{e768}"; opacity: 1 - root.glyph-mix; }
+    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; color: white; text: "\u{e769}"; opacity: root.glyph-mix; }
 }
 
 // Keep the normalized fill, corner treatment, and optional seek thumb identical
 // across media, volume, and countdown displays. The host owns all input handling.
 export component ProgressTrack inherits Rectangle {
+    in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
     in property <float> value: 0;
-    in property <color> track-color: #ffffff28;
-    in property <color> fill-color: #e4e4ea;
+    in property <color> track-color: (root.light-material ? #00000028 : #ffffff28);
+    in property <color> fill-color: (root.light-material ? #202024 : #e4e4ea);
     in property <bool> show-thumb: false;
     in property <length> thumb-size: (9 * root.scaled-pixel);
     in property <color> thumb-color: root.fill-color;
@@ -93,14 +99,15 @@ export component ProgressTrack inherits Rectangle {
 }
 
 export component Artwork inherits Rectangle {
+    in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
     in property <image> artwork;
     in property <bool> has-artwork: false;
     in property <string> placeholder-glyph: "\u{e8d6}";
     border-radius: min((6 * root.scaled-pixel), self.width / 4);
-    background: #ffffff16;
+    background: (root.light-material ? #00000016 : #ffffff16);
     clip: true;
     if root.has-artwork : Image { x: 0px; y: 0px; width: parent.width; height: parent.height; source: root.artwork; image-fit: cover; }
-    if !root.has-artwork : Glyph { ui-scale: root.ui-scale; x: 0px; y: 0px; width: parent.width; height: parent.height; text: root.placeholder-glyph; font-size: (22 * root.scaled-pixel); color: #b4b4bc; }
+    if !root.has-artwork : Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: 0px; width: parent.width; height: parent.height; text: root.placeholder-glyph; font-size: (22 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #b4b4bc); }
 }

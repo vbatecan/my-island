@@ -216,7 +216,7 @@ pub(super) fn close_preferences(app: &Rc<RefCell<App>>, hide: bool) {
         let mut a = app.borrow_mut();
         a.settings_visible = false;
         let now = a.now();
-        let hidden = a.hidden;
+        let hidden = a.visibility.locked;
         a.coordinator.suppress(hidden, now);
     }
     sync_presentation(app);

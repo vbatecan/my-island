@@ -512,6 +512,7 @@ pub enum Appearance {
     Acrylic = 2,
     Glass = 3,
     LiveGlass = 4,
+    LiquidGlass = 5,
 }
 impl Appearance {
     pub fn from_index(index: i32) -> Self {
@@ -520,6 +521,7 @@ impl Appearance {
             2 => Self::Acrylic,
             3 => Self::Glass,
             4 => Self::LiveGlass,
+            5 => Self::LiquidGlass,
             _ => Self::Solid,
         }
     }
@@ -529,6 +531,7 @@ impl Appearance {
             "acrylic" => Self::Acrylic,
             "glass" => Self::Glass,
             "live-glass" => Self::LiveGlass,
+            "liquid-glass" => Self::LiquidGlass,
             _ => Self::Solid,
         }
     }
@@ -539,6 +542,7 @@ impl Appearance {
             Self::Acrylic => "acrylic",
             Self::Glass => "glass",
             Self::LiveGlass => "live-glass",
+            Self::LiquidGlass => "liquid-glass",
         }
     }
     pub fn name(self) -> &'static str {
@@ -548,7 +552,23 @@ impl Appearance {
             Self::Acrylic => "Acrylic",
             Self::Glass => "Eco glass",
             Self::LiveGlass => "Live glass",
+            Self::LiquidGlass => "Liquid Glass",
         }
+    }
+}
+#[cfg(test)]
+mod liquid_settings_tests {
+    use super::*;
+    #[test]
+    fn liquid_selection_round_trips_without_changing_existing_indices() {
+        let s = Settings::parse("appearance=liquid-glass\n");
+        assert_eq!(s.appearance, Appearance::LiquidGlass);
+        assert_eq!(
+            Settings::parse(&s.encode()).appearance,
+            Appearance::LiquidGlass
+        );
+        assert_eq!(Appearance::from_index(5), Appearance::LiquidGlass);
+        assert_eq!(Appearance::from_index(4), Appearance::LiveGlass);
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

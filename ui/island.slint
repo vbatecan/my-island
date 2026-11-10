@@ -1,3 +1,4 @@
+import { DigitFrame, RollingTime, WavyProgress, ChargingIcon, ChargingBackground } from "components/illustrations.slint";
 export { PluginManagerWindow, PluginListEntry, PluginActionEntry, PluginConfigEntry, PluginVisualNode } from "plugins.slint";
 import { PluginView, PluginListEntry, PluginActionEntry, PluginConfigEntry, PluginVisualNode } from "plugins.slint";
 export { SettingsWindow, NotificationApp } from "settings.slint";
@@ -71,12 +72,34 @@ export component IslandWindow inherits Window {
     in property <float> canvas-height: 300;
     private property <length> scaled-pixel: 1px * root.ui-scale;
 
+    in-out property <bool> fullscreen-media-event: false;
     in property <float> shape-width: 126;
     in property <float> shape-height: 32;
     in property <float> shape-radius: 16;
     in property <string> shape-path;
     in property <bool> form-notch: true;
     in property <float> shoulder: 8;
+    pure callback wave-path(float, float, float, float) -> string;
+    in property <bool> illustration-visible: true;
+    private property <bool> illustration-motion: root.illustration-visible && root.media-motion-enabled;
+    private property <float> wave-phase: 0;
+    private property <float> wave-amplitude: root.illustration-motion && root.playing && !root.seeking ? 1 : 0;
+    animate wave-amplitude { duration: root.illustration-motion ? 180ms / root.animation-speed : 0ms; }
+    Timer { interval: 34ms; running: root.illustration-motion && root.media-available && ((root.compact-media && root.compact-reveal > 0.01) || (root.media-mode && root.reveal > 0.01)) && root.playing && !root.seeking; triggered => { root.wave-phase = mod(root.wave-phase + 0.1526 * root.animation-speed, 6.283185); } }
+    in property <float> charge-intensity: 0;
+    in property <float> charge-phase: 0;
+    in property <bool> charge-connecting: true;
+    in property <bool> battery-power-connected: false;
+    in property <bool> battery-level-known: false;
+    private property <color> battery-accent: !root.battery-level-known ? #dedee5 : root.battery-level <= 0.20 ? #f16b70 : root.battery-level < 0.50 ? #edc968 : #79d9a0;
+    animate battery-accent { duration: root.illustration-motion ? 200ms / root.animation-speed : 0ms; }
+    in property <[DigitFrame]> timer-digits;
+    in property <int> timer-seconds: 300;
+    in property <float> timer-step: 0;
+    in property <bool> timer-digit-animate: false;
+    private property <float> timer-position: root.timer-step;
+    animate timer-position { duration: root.illustration-motion && root.timer-digit-animate && ((root.timer-mode && root.reveal > 0.01) || (root.compact-timer && root.compact-reveal > 0.01)) && (root.timer-running || root.timer-finished) ? 220ms / root.animation-speed : 0ms; easing: ease-out; }
+    private property <float> timer-roll: min(1, max(0, root.timer-step - root.timer-position));
     in property <bool> battery-mode: false;
     in property <bool> compact-battery: false;
     in property <bool> battery-present: false;
@@ -183,7 +206,11 @@ export component IslandWindow inherits Window {
     // 0: solid, 1: transparent, 2: clipped frosted acrylic, 3: refracted glass.
     in property <int> appearance: 0;
     in property <float> tint-opacity: 0.55;
+    in property <bool> liquid-dark-backdrop: false;
+    private property <bool> light-material: root.appearance == 5 && root.has-glass-texture && !root.liquid-dark-backdrop;
     in property <string> material-name: "Solid";
+    private property <float> liquid-rim: island-pointer.pressed ? 0.30 : island-pointer.has-hover ? 0.62 : 0.44;
+    animate liquid-rim { duration: root.media-motion-enabled ? 120ms / root.animation-speed : 0ms; }
     in property <image> glass-texture;
     in property <bool> has-glass-texture: false;
 
@@ -282,9 +309,10 @@ export component IslandWindow inherits Window {
         height: root.shape-height * root.scaled-pixel;
         // Shape rendering includes the concave shoulders. Contents stay in the
         // central body, where a normal rectangle clip is sufficient.
-        if (root.appearance == 2 || root.appearance == 3) && root.has-glass-texture : Image {
-            x: -root.shoulder * root.scaled-pixel; y: 0px;
-            width: parent.width + 2 * root.shoulder * root.scaled-pixel; height: parent.height;
+        if (root.appearance == 2 || root.appearance == 3 || root.appearance == 5) && root.has-glass-texture : Image {
+            x: root.appearance == 5 ? (parent.width - root.canvas-width * root.scaled-pixel) / 2 : -root.shoulder * root.scaled-pixel; y: 0px;
+            width: root.appearance == 5 ? root.canvas-width * root.scaled-pixel : parent.width + 2 * root.shoulder * root.scaled-pixel;
+            height: root.appearance == 5 ? root.canvas-height * root.scaled-pixel : parent.height;
             source: root.glass-texture; image-fit: fill;
         }
         Path {
@@ -295,7 +323,7 @@ export component IslandWindow inherits Window {
             viewbox-width: root.shape-width + 2 * root.shoulder;
             viewbox-height: root.shape-height;
             commands: root.shape-path;
-            fill: root.appearance == 0 ? #000000 : rgba(0, 0, 0, min(1, max(0, root.tint-opacity)));
+            fill: root.appearance == 5 ? (root.has-glass-texture ? transparent : rgba(0,0,0,0.72)) : root.appearance == 0 ? #000000 : rgba(0, 0, 0, min(1, max(0, root.tint-opacity)));
         }
         if root.appearance == 3 && root.form-notch : Path {
             x: -root.shoulder * root.scaled-pixel; y: 0px;
@@ -304,19 +332,28 @@ export component IslandWindow inherits Window {
             viewbox-width: root.shape-width + 2 * root.shoulder;
             viewbox-height: root.shape-height;
             commands: root.shape-path;
-            stroke-width: root.scaled-pixel; stroke: #ffffff32;
+            stroke-width: root.scaled-pixel; stroke: root.appearance == 5 ? #ffffff.with-alpha(root.liquid-rim) : #ffffff32;
             fill: @linear-gradient(145deg, #ffffff16 0%, #ffffff00 42%, #ffffff08 100%);
         }
         if !root.form-notch : Rectangle {
             width: parent.width; height: parent.height;
             border-radius: root.shape-radius * root.scaled-pixel;
-            background: root.appearance == 0 ? #000000 : rgba(0, 0, 0, min(1, max(0, root.tint-opacity)));
+            background: root.appearance == 5 ? (root.has-glass-texture ? transparent : rgba(0,0,0,0.72)) : root.appearance == 0 ? #000000 : rgba(0, 0, 0, min(1, max(0, root.tint-opacity)));
         }
         if !root.form-notch && root.appearance == 3 : Rectangle {
             width: parent.width; height: parent.height;
             border-radius: root.shape-radius * root.scaled-pixel;
-            border-width: root.scaled-pixel; border-color: #ffffff32;
-            background: @linear-gradient(145deg, #ffffff16 0%, #ffffff00 42%, #ffffff08 100%);
+            border-width: root.scaled-pixel; border-color: root.appearance == 5 ? #ffffff.with-alpha(root.liquid-rim) : #ffffff32;
+            background: @linear-gradient(145deg, (root.light-material ? #00000016 : #ffffff16) 0%, (root.light-material ? #00000000 : #ffffff00) 42%, (root.light-material ? #00000008 : #ffffff08) 100%);
+        }
+        ChargingBackground { light-material: root.light-material;
+            width: parent.width; height: parent.height;
+            border-radius: root.shape-radius * root.scaled-pixel;
+            active: root.charge-intensity > 0 && root.illustration-motion;
+            intensity: root.charge-intensity; phase: root.charge-phase;
+            connecting: root.charge-connecting;
+            lit: root.charge-intensity > 0 && root.illustration-visible;
+            ink: root.charge-connecting ? root.battery-accent : (root.light-material ? #4b4b54 : #a6a6b0); ui-scale: root.ui-scale;
         }
         island-pointer := TouchArea {
             // Observe hover before child controls handle their own pointer events.
@@ -344,16 +381,16 @@ export component IslandWindow inherits Window {
                     width: (184 * root.scaled-pixel); height: (30 * root.scaled-pixel);
                     opacity: root.compact-reveal;
                     visible: root.compact-reveal > 0.001 && !root.notification-compact && !root.compact-media && !root.compact-timer && !root.compact-plugin && !root.compact-battery;
-                    QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); }
+                    QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); }
                         x: -(3 * root.scaled-pixel); y: -root.scaled-pixel; width: (27 * root.scaled-pixel); height: (29 * root.scaled-pixel);
                         glyph: root.volume-muted ? "\u{e74f}" : "\u{e767}";
                         label: root.volume-muted ? "Unmute output" : "Mute output";
                         enabled: root.volume-available;
                         clicked => { root.toggle-mute(); }
                     }
-                    Text { x: (34 * root.scaled-pixel); y: 0px; width: (110 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: white; font-size: (12 * root.font-pixel); font-weight: 600; text: root.volume-muted ? "Muted" : "Volume"; }
-                    Text { x: (140 * root.scaled-pixel); y: 0px; width: (44 * root.scaled-pixel); height: (18 * root.scaled-pixel); horizontal-alignment: right; color: #c4c4ca; font-size: (11 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
-                    ProgressTrack { ui-scale: root.ui-scale; x: (34 * root.scaled-pixel); y: (23 * root.scaled-pixel); width: (150 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? #96969e : #e7e7eb; }
+                    Text { x: (34 * root.scaled-pixel); y: 0px; width: (110 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (12 * root.font-pixel); font-weight: 600; text: root.volume-muted ? "Muted" : "Volume"; }
+                    Text { x: (140 * root.scaled-pixel); y: 0px; width: (44 * root.scaled-pixel); height: (18 * root.scaled-pixel); horizontal-alignment: right; color: (root.light-material ? #4b4b54 : #c4c4ca); font-size: (11 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
+                    ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: (34 * root.scaled-pixel); y: (23 * root.scaled-pixel); width: (150 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e7e7eb); }
                     compact-slider := TouchArea {
                         x: (34 * root.scaled-pixel); y: (16 * root.scaled-pixel); width: (150 * root.scaled-pixel); height: (14 * root.scaled-pixel);
                         enabled: root.volume-available;
@@ -367,10 +404,10 @@ export component IslandWindow inherits Window {
                     x: (parent.width - (184 * root.scaled-pixel)) / 2; y: (parent.height - (30 * root.scaled-pixel)) / 2;
                     width: (184 * root.scaled-pixel); height: (30 * root.scaled-pixel); opacity: root.compact-reveal;
                     visible: root.compact-reveal > 0.001;
-                    Artwork { ui-scale: root.ui-scale; x: 0px; y: (2 * root.scaled-pixel); width: (26 * root.scaled-pixel); height: (26 * root.scaled-pixel); artwork: root.notification-icon; has-artwork: root.has-notification-icon; placeholder-glyph: "\u{e7f4}"; }
-                    Text { x: (36 * root.scaled-pixel); y: 0px; width: root.notification-count > 1 ? (116 * root.scaled-pixel) : (148 * root.scaled-pixel); height: (13 * root.scaled-pixel); text: root.notification-app; color: #b9b9c2; font-size: (10 * root.font-pixel); overflow: elide; }
-                    Text { x: (36 * root.scaled-pixel); y: (15 * root.scaled-pixel); width: (148 * root.scaled-pixel); height: (15 * root.scaled-pixel); text: root.notification-title; color: white; font-size: (11 * root.font-pixel); font-weight: 600; overflow: elide; }
-                    if root.notification-count > 1 : Text { x: (160 * root.scaled-pixel); y: 0px; width: (24 * root.scaled-pixel); height: (13 * root.scaled-pixel); horizontal-alignment: right; color: #b9b9c2; font-size: (9 * root.font-pixel); text: root.notification-count > 9 ? "9+" : root.notification-count; }
+                    Artwork { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (2 * root.scaled-pixel); width: (26 * root.scaled-pixel); height: (26 * root.scaled-pixel); artwork: root.notification-icon; has-artwork: root.has-notification-icon; placeholder-glyph: "\u{e7f4}"; }
+                    Text { x: (36 * root.scaled-pixel); y: 0px; width: root.notification-count > 1 ? (116 * root.scaled-pixel) : (148 * root.scaled-pixel); height: (13 * root.scaled-pixel); text: root.notification-app; color: (root.light-material ? #4b4b54 : #b9b9c2); font-size: (10 * root.font-pixel); overflow: elide; }
+                    Text { x: (36 * root.scaled-pixel); y: (15 * root.scaled-pixel); width: (148 * root.scaled-pixel); height: (15 * root.scaled-pixel); text: root.notification-title; color: (root.light-material ? #202024 : white); font-size: (11 * root.font-pixel); font-weight: 600; overflow: elide; }
+                    if root.notification-count > 1 : Text { x: (160 * root.scaled-pixel); y: 0px; width: (24 * root.scaled-pixel); height: (13 * root.scaled-pixel); horizontal-alignment: right; color: (root.light-material ? #4b4b54 : #b9b9c2); font-size: (9 * root.font-pixel); text: root.notification-count > 9 ? "9+" : root.notification-count; }
                     TouchArea {
                         changed pressed => { root.pointer-interaction(self.pressed); }
                         clicked => { root.expand-notification(); }
@@ -380,47 +417,48 @@ export component IslandWindow inherits Window {
                     x: (parent.width - (184 * root.scaled-pixel)) / 2; y: (parent.height - (30 * root.scaled-pixel)) / 2;
                     width: (184 * root.scaled-pixel); height: (30 * root.scaled-pixel); opacity: root.compact-reveal;
                     visible: root.compact-reveal > 0.001;
-                    Glyph { ui-scale: root.ui-scale; x: 0px; y: (3 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (24 * root.scaled-pixel); font-size: (21 * root.scaled-pixel); text: "\u{e83f}"; color: #dedee5; }
-                    Text { x: (40 * root.scaled-pixel); y: 0px; width: (144 * root.scaled-pixel); height: (16 * root.scaled-pixel); text: root.battery-percent-label; color: white; font-size: (12 * root.font-pixel); font-weight: 600; }
-                    Text { x: (40 * root.scaled-pixel); y: (17 * root.scaled-pixel); width: (144 * root.scaled-pixel); height: (13 * root.scaled-pixel); text: root.battery-power-label; color: #b8b8c1; font-size: (10 * root.font-pixel); overflow: elide; }
+                    ChargingIcon { light-material: root.light-material; burst: root.illustration-motion && root.charge-connecting ? root.charge-intensity : 0; ui-scale: root.ui-scale; x: 0px; y: (3 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (24 * root.scaled-pixel); font-size: (21 * root.scaled-pixel); ink: root.battery-accent; }
+                    Text { x: (40 * root.scaled-pixel); y: 0px; width: (144 * root.scaled-pixel); height: (16 * root.scaled-pixel); text: root.battery-percent-label; color: (root.light-material ? #202024 : white); font-size: (12 * root.font-pixel); font-weight: 600; }
+                    Text { x: (40 * root.scaled-pixel); y: (17 * root.scaled-pixel); width: (144 * root.scaled-pixel); height: (13 * root.scaled-pixel); text: root.battery-power-label; color: (root.light-material ? #4b4b54 : #b8b8c1); font-size: (10 * root.font-pixel); overflow: elide; }
                     TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-battery(); } }
                 }
                 if root.compact-media : Rectangle {
                     x: (18 * root.scaled-pixel); y: (parent.height - self.height) / 2;
                     width: max(184 * root.scaled-pixel, parent.width - 36 * root.scaled-pixel); height: min(parent.height - 6 * root.scaled-pixel, 30 * root.font-pixel); opacity: root.compact-reveal;
                     visible: root.compact-reveal > 0.001;
-                    Artwork { ui-scale: root.ui-scale; x: 0px; y: (parent.height - self.height) / 2 - 2 * root.scaled-pixel * root.media-pulse; opacity: 1 - 0.18 * root.media-pulse; width: (30 * root.scaled-pixel); height: (30 * root.scaled-pixel); artwork: root.artwork; has-artwork: root.has-artwork; }
-                    Text { x: (40 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - 76 * root.scaled-pixel); height: (16 * root.font-pixel); opacity: 1 - 0.22 * root.media-pulse; text: root.track-title; color: white; font-size: (11 * root.font-pixel); font-weight: 600; overflow: elide; }
-                    Text { x: (40 * root.scaled-pixel); y: (16 * root.font-pixel); width: max(0px, parent.width - 76 * root.scaled-pixel); height: (12 * root.font-pixel); text: root.artist-name != "" ? root.artist-name : root.playing ? "Playing" : "Paused"; color: #b8b8c1; font-size: (9 * root.font-pixel); overflow: elide; }
-                    ProgressTrack { ui-scale: root.ui-scale; x: (40 * root.scaled-pixel); y: parent.height - 2 * root.scaled-pixel; width: max(0px, parent.width - 76 * root.scaled-pixel); height: (2 * root.scaled-pixel); value: root.progress; track-color: #ffffff25; fill-color: root.playing ? #eeeeef : #85858f; }
+                    Artwork { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (parent.height - self.height) / 2 - 2 * root.scaled-pixel * root.media-pulse; opacity: 1 - 0.18 * root.media-pulse; width: (30 * root.scaled-pixel); height: (30 * root.scaled-pixel); artwork: root.artwork; has-artwork: root.has-artwork; }
+                    Text { x: (40 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - 76 * root.scaled-pixel); height: (16 * root.font-pixel); opacity: 1 - 0.22 * root.media-pulse; text: root.track-title; color: (root.light-material ? #202024 : white); font-size: (11 * root.font-pixel); font-weight: 600; overflow: elide; }
+                    Text { x: (40 * root.scaled-pixel); y: (16 * root.font-pixel); width: max(0px, parent.width - 76 * root.scaled-pixel); height: (12 * root.font-pixel); text: root.artist-name != "" ? root.artist-name : root.playing ? "Playing" : "Paused"; color: (root.light-material ? #4b4b54 : #b8b8c1); font-size: (9 * root.font-pixel); overflow: elide; }
+                    WavyProgress { light-material: root.light-material; wave: root.wave-path(self.width / root.scaled-pixel, self.value, root.wave-phase, 0.75 * root.wave-amplitude); ui-scale: root.ui-scale; x: (40 * root.scaled-pixel); y: parent.height - 2 * root.scaled-pixel; width: max(0px, parent.width - 76 * root.scaled-pixel); height: (2 * root.scaled-pixel); value: root.progress; track-color: (root.light-material ? #00000025 : #ffffff25); fill-color: root.playing ? (root.light-material ? #202024 : #eeeeef) : (root.light-material ? #4b4b54 : #85858f); }
                     TouchArea { x: 0px; y: 0px; width: max(0px, parent.width - 36 * root.scaled-pixel); height: parent.height; changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-media(); } }
-                    PlaybackButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - 30 * root.scaled-pixel; y: (parent.height - self.height) / 2; width: (30 * root.scaled-pixel); height: (28 * root.scaled-pixel); playing: root.playing; motion-enabled: root.media-motion-enabled && self.visible && ((root.compact-media && root.compact-reveal > 0.01) || (root.wide-media && root.reveal > 0.01)); motion-speed: root.animation-speed; label: root.playing ? "Pause playback" : "Play"; enabled: root.can-play-pause; clicked => { root.play-pause(); } }
+                    PlaybackButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - 30 * root.scaled-pixel; y: (parent.height - self.height) / 2; width: (30 * root.scaled-pixel); height: (28 * root.scaled-pixel); playing: root.playing; motion-enabled: root.media-motion-enabled && self.visible && ((root.compact-media && root.compact-reveal > 0.01) || (root.wide-media && root.reveal > 0.01)); motion-speed: root.animation-speed; label: root.playing ? "Pause playback" : "Play"; enabled: root.can-play-pause; clicked => { root.play-pause(); } }
                 }
 
                 if root.compact-plugin : Rectangle {
                     x: 18 * root.scaled-pixel; y: (parent.height - self.height) / 2;
                     width: max(184 * root.scaled-pixel, parent.width - 36 * root.scaled-pixel);
                     height: min(parent.height - 6 * root.scaled-pixel, 30 * root.font-pixel); opacity: root.compact-reveal;
-                    Rectangle { x: 0px; y: (parent.height - self.height) / 2; width: 27 * root.scaled-pixel; height: 27 * root.scaled-pixel; border-radius: 7 * root.scaled-pixel; background: #ffffff0a;
+                    Rectangle { x: 0px; y: (parent.height - self.height) / 2; width: 27 * root.scaled-pixel; height: 27 * root.scaled-pixel; border-radius: 7 * root.scaled-pixel; background: (root.light-material ? #0000000a : #ffffff0a);
                         for tile in [0,1,2,3] : Rectangle { x: (7 + mod(tile,2) * 8) * root.scaled-pixel; y: (7 + floor(tile / 2) * 8) * root.scaled-pixel; width: 5 * root.scaled-pixel; height: 5 * root.scaled-pixel; border-radius: root.scaled-pixel; background: tile == 0 ? root.plugin-accent : #d7d7df; }
                     }
-                    Text { x: 36 * root.scaled-pixel; y: 0px; width: max(0px, parent.width - 36 * root.scaled-pixel); text: root.plugin-title; color: white; font-size: 11 * root.font-pixel; font-weight: 600; height: 15 * root.font-pixel; overflow: elide; }
-                    Text { x: 36 * root.scaled-pixel; y: 15 * root.font-pixel; width: max(0px, parent.width - 36 * root.scaled-pixel); text: root.plugin-body; color: #aaaab5; font-size: 9 * root.font-pixel; height: 12 * root.font-pixel; overflow: elide; }
-                    ProgressTrack { ui-scale: root.ui-scale; x: 36 * root.scaled-pixel; y: parent.height - 2 * root.scaled-pixel; width: max(0px, parent.width - 36 * root.scaled-pixel); height: 2 * root.scaled-pixel; value: root.plugin-progress; fill-color: root.plugin-accent; visible: root.plugin-has-progress; }
+                    Text { x: 36 * root.scaled-pixel; y: 0px; width: max(0px, parent.width - 36 * root.scaled-pixel); text: root.plugin-title; color: (root.light-material ? #202024 : white); font-size: 11 * root.font-pixel; font-weight: 600; height: 15 * root.font-pixel; overflow: elide; }
+                    Text { x: 36 * root.scaled-pixel; y: 15 * root.font-pixel; width: max(0px, parent.width - 36 * root.scaled-pixel); text: root.plugin-body; color: (root.light-material ? #4b4b54 : #aaaab5); font-size: 9 * root.font-pixel; height: 12 * root.font-pixel; overflow: elide; }
+                    ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 36 * root.scaled-pixel; y: parent.height - 2 * root.scaled-pixel; width: max(0px, parent.width - 36 * root.scaled-pixel); height: 2 * root.scaled-pixel; value: root.plugin-progress; fill-color: root.plugin-accent; visible: root.plugin-has-progress; }
                     TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.toggle(); } }
                 }
                 if root.compact-timer : Rectangle {
                     x: (parent.width - (184 * root.scaled-pixel)) / 2; y: (parent.height - (30 * root.scaled-pixel)) / 2;
                     width: (184 * root.scaled-pixel); height: (30 * root.scaled-pixel); opacity: root.compact-reveal;
                     visible: root.compact-reveal > 0.001;
-                    Glyph { ui-scale: root.ui-scale; x: 0px; y: (3 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (24 * root.scaled-pixel); font-size: (21 * root.scaled-pixel); text: "\u{e916}"; color: root.timer-finished ? #f1d795 : #e1e1e8; }
-                    Text { x: (39 * root.scaled-pixel); y: -root.scaled-pixel; width: (110 * root.scaled-pixel); height: (19 * root.scaled-pixel); color: white; font-size: (14 * root.font-pixel); font-weight: 600; text: root.timer-finished ? "Time is up" : root.timer-label; }
-                    Text { x: (40 * root.scaled-pixel); y: (19 * root.scaled-pixel); width: (106 * root.scaled-pixel); height: (11 * root.scaled-pixel); color: #aaaab4; font-size: (9 * root.font-pixel); text: root.timer-finished ? "Timer complete" : root.timer-running ? "Counting down" : "Paused"; }
+                    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (3 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (24 * root.scaled-pixel); font-size: (21 * root.scaled-pixel); text: "\u{e916}"; color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : #e1e1e8); }
+                    Text { visible: root.timer-finished; opacity: 1 - root.timer-roll; x: (39 * root.scaled-pixel); y: -root.scaled-pixel; width: (110 * root.scaled-pixel); height: (19 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (14 * root.font-pixel); font-weight: 600; text: "Time is up"; }
+                    RollingTime { light-material: root.light-material; digits: root.timer-digits; roll: root.timer-roll; visible: !root.timer-finished || root.timer-roll > 0.001; x: (39 * root.scaled-pixel); y: -root.scaled-pixel; width: (110 * root.scaled-pixel); height: (19 * root.scaled-pixel); ink: (root.light-material ? #202024 : white); font-size: (14 * root.font-pixel);   }
+                    Text { x: (40 * root.scaled-pixel); y: (19 * root.scaled-pixel); width: (106 * root.scaled-pixel); height: (11 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (9 * root.font-pixel); text: root.timer-finished ? "Timer complete" : root.timer-running ? "Counting down" : "Paused"; }
                     TouchArea { x: 0px; y: 0px; width: (148 * root.scaled-pixel); height: (30 * root.scaled-pixel); changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-timer(); } }
-                    QuietButton { ui-scale: root.ui-scale; x: (154 * root.scaled-pixel); y: root.scaled-pixel; width: (30 * root.scaled-pixel); height: (28 * root.scaled-pixel); glyph: root.timer-running ? "\u{e769}" : "\u{e768}"; label: root.timer-running ? "Pause countdown" : "Resume countdown"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-toggle(); } }
+                    QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; x: (154 * root.scaled-pixel); y: root.scaled-pixel; width: (30 * root.scaled-pixel); height: (28 * root.scaled-pixel); glyph: root.timer-running ? "\u{e769}" : "\u{e768}"; label: root.timer-running ? "Pause countdown" : "Resume countdown"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-toggle(); } }
                 }
 
-                app-search := AppLauncher {
+                app-search := AppLauncher { light-material: root.light-material;
                     x: 24 * root.scaled-pixel;
                     y: (16 + root.content-shift) * root.scaled-pixel;
                     width: max(0, root.shape-width - 48) * root.scaled-pixel;
@@ -450,14 +488,14 @@ export component IslandWindow inherits Window {
                     visible: !root.app-launcher-mode && root.reveal > 0.001 && (!root.wide-media || root.media-space > 0.001);
                     Text {
                         x: root.wide-media ? root.media-column-x * root.scaled-pixel : 0px; y: root.scaled-pixel; width: max(0, root.header-content-width - (root.media-mode ? 18 : 0)) * root.scaled-pixel; height: (20 * root.scaled-pixel);
-                        color: #b8b8c0; font-size: (10 * root.font-pixel); font-weight: 600; letter-spacing: root.scaled-pixel;
+                        color: (root.light-material ? #4b4b54 : #b8b8c0); font-size: (10 * root.font-pixel); font-weight: 600; letter-spacing: root.scaled-pixel;
                         overflow: elide;
                         text: root.notification-mode ? root.notification-app : root.battery-mode ? "BATTERY" : root.timer-finished ? "COUNTDOWN" : root.plugin-mode && !root.plugin-view-open ? "INTEGRATIONS" : root.page-count > 1 && root.page-label != "" ? (root.media-mode ? root.player-label : root.page-label) + " · " + (root.page-index + 1) + "/" + root.page-count + "  ↕" : root.plugin-mode ? root.plugin-title : root.timer-mode ? "COUNTDOWN" : root.media-mode ? root.player-label : root.volume-mode ? "SYSTEM AUDIO" : "STILL";
                     }
                     if !root.media-mode && !root.volume-mode && !root.notification-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode : Rectangle {
                         x: root.battery-present ? (216 * root.scaled-pixel) : (186 * root.scaled-pixel); y: (105 * root.scaled-pixel); width: root.battery-present ? (96 * root.scaled-pixel) : (126 * root.scaled-pixel); height: (22 * root.scaled-pixel); border-radius: (5 * root.scaled-pixel);
-                        background: integration-entry.has-hover ? #ffffff20 : #ffffff0c;
-                        Text { text: "Integrations"; color: #c5c5cd; font-size: (10 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
+                        background: integration-entry.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #0000000c : #ffffff0c);
+                        Text { text: "Integrations"; color: (root.light-material ? #4b4b54 : #c5c5cd); font-size: (10 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
                         integration-entry := TouchArea { clicked => { root.open-plugins(); } }
                     }
                     plugin-panel := Rectangle {
@@ -466,20 +504,20 @@ export component IslandWindow inherits Window {
                         if !root.plugin-view-open : Flickable {
                             width: parent.width; height: parent.height; content-width: self.width;
                             content-height: max(self.height, (root.plugin-list.length + root.plugin-actions.length) * (28 * root.scaled-pixel) + (24 * root.scaled-pixel));
-                            TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: parent.width - 88 * root.scaled-pixel; y: 0px; width: (88 * root.scaled-pixel); height: (21 * root.scaled-pixel); label: "Manage…"; clicked => { root.manage-plugins(); } }
-                            Text { x: 0px; y: (2 * root.scaled-pixel); width: max(0px, parent.width - 102 * root.scaled-pixel); height: (18 * root.scaled-pixel); text: root.plugin-list.length == 0 ? "Add your first integration" : "Your integrations"; color: #aaaab5; font-size: (11 * root.font-pixel); }
-                            for item[index] in root.plugin-actions : TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (26 * root.scaled-pixel) + index * (28 * root.scaled-pixel); width: parent.width; height: (24 * root.scaled-pixel); label: item.label; clicked => { root.plugin-action(item.plugin-id,item.id,""); } }
-                            for item[index] in root.plugin-list : TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (26 * root.scaled-pixel) + (index + root.plugin-actions.length) * (28 * root.scaled-pixel); width: parent.width; height: (24 * root.scaled-pixel); label: item.label + (item.enabled ? "" : " · disabled"); clicked => { root.plugin-select(item.id); } }
+                            TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: parent.width - 88 * root.scaled-pixel; y: 0px; width: (88 * root.scaled-pixel); height: (21 * root.scaled-pixel); label: "Manage…"; clicked => { root.manage-plugins(); } }
+                            Text { x: 0px; y: (2 * root.scaled-pixel); width: max(0px, parent.width - 102 * root.scaled-pixel); height: (18 * root.scaled-pixel); text: root.plugin-list.length == 0 ? "Add your first integration" : "Your integrations"; color: (root.light-material ? #4b4b54 : #aaaab5); font-size: (11 * root.font-pixel); }
+                            for item[index] in root.plugin-actions : TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (26 * root.scaled-pixel) + index * (28 * root.scaled-pixel); width: parent.width; height: (24 * root.scaled-pixel); label: item.label; clicked => { root.plugin-action(item.plugin-id,item.id,""); } }
+                            for item[index] in root.plugin-list : TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (26 * root.scaled-pixel) + (index + root.plugin-actions.length) * (28 * root.scaled-pixel); width: parent.width; height: (24 * root.scaled-pixel); label: item.label + (item.enabled ? "" : " · disabled"); clicked => { root.plugin-select(item.id); } }
                         }
                         plugin-view-content := Rectangle {
                             visible: root.plugin-view-open;
-                            plugin-view := PluginView { ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: 0px; width: parent.width; height: max(0, root.shape-height - 66) * root.scaled-pixel; nodes: root.plugin-nodes; content-height: root.plugin-view-height;
+                            plugin-view := PluginView { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: 0px; width: parent.width; height: max(0, root.shape-height - 66) * root.scaled-pixel; nodes: root.plugin-nodes; content-height: root.plugin-view-height;
                                 action(id,value) => { root.plugin-action("",id,value); } edit-requested => { root.plugin-edit(); }
                             }
                         }
                     }
-                    if root.lyrics-visible : Text { x: 0px; y: root.scaled-pixel; width: root.lyrics-column-width * root.scaled-pixel; height: (20 * root.scaled-pixel); text: "LYRICS"; color: #b8b8c0; font-size: (10 * root.font-pixel); font-weight: 600; letter-spacing: root.scaled-pixel; }
-                    if root.media-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode : Glyph { ui-scale: root.ui-scale; x: (root.media-column-x + root.header-content-width - 14) * root.scaled-pixel; y: (4 * root.scaled-pixel); width: (10 * root.scaled-pixel); height: (13 * root.scaled-pixel); font-size: (9 * root.scaled-pixel); color: #b8b8c0; text: root.player-picker-open ? "\u{e70e}" : "\u{e70d}"; }
+                    if root.lyrics-visible : Text { x: 0px; y: root.scaled-pixel; width: root.lyrics-column-width * root.scaled-pixel; height: (20 * root.scaled-pixel); text: "LYRICS"; color: (root.light-material ? #4b4b54 : #b8b8c0); font-size: (10 * root.font-pixel); font-weight: 600; letter-spacing: root.scaled-pixel; }
+                    if root.media-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode : Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (root.media-column-x + root.header-content-width - 14) * root.scaled-pixel; y: (4 * root.scaled-pixel); width: (10 * root.scaled-pixel); height: (13 * root.scaled-pixel); font-size: (9 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #b8b8c0); text: root.player-picker-open ? "\u{e70e}" : "\u{e70d}"; }
                     if root.media-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode : TouchArea {
                         x: root.media-column-x * root.scaled-pixel; y: -(3 * root.scaled-pixel); width: root.header-content-width * root.scaled-pixel; height: (27 * root.scaled-pixel);
                         mouse-cursor: pointer; accessible-role: AccessibleRole.button; accessible-label: "Choose media player";
@@ -487,58 +525,58 @@ export component IslandWindow inherits Window {
                         clicked => { root.player-picker-open = !root.player-picker-open; }
                     }
                     if root.volume-feedback : Rectangle {
-                        x: parent.width - (180 * root.scaled-pixel); y: -(2 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (23 * root.scaled-pixel); border-radius: (11 * root.scaled-pixel); background: #333338;
-                        Glyph { ui-scale: root.ui-scale; x: (7 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (17 * root.scaled-pixel); font-size: (11 * root.scaled-pixel); text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
-                        Text { x: (28 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (42 * root.scaled-pixel); height: (17 * root.scaled-pixel); color: white; font-size: (10 * root.font-pixel); text: root.volume-muted ? "Muted" : root.volume + "%"; }
+                        x: parent.width - (180 * root.scaled-pixel); y: -(2 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (23 * root.scaled-pixel); border-radius: (11 * root.scaled-pixel); background: (root.light-material ? #f0f0f4 : #333338);
+                        Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (7 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (17 * root.scaled-pixel); font-size: (11 * root.scaled-pixel); text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
+                        Text { x: (28 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (42 * root.scaled-pixel); height: (17 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (10 * root.font-pixel); text: root.volume-muted ? "Muted" : root.volume + "%"; }
                     }
                     if root.pending-count > 0 && !root.notification-mode : Rectangle {
-                        x: parent.width - (122 * root.scaled-pixel); y: 0px; width: (19 * root.scaled-pixel); height: (17 * root.scaled-pixel); border-radius: (8 * root.scaled-pixel); background: #ffffff20;
+                        x: parent.width - (122 * root.scaled-pixel); y: 0px; width: (19 * root.scaled-pixel); height: (17 * root.scaled-pixel); border-radius: (8 * root.scaled-pixel); background: (root.light-material ? #00000020 : #ffffff20);
                         visible: !root.volume-feedback;
-                        Text { text: root.pending-count > 9 ? "9+" : root.pending-count; color: white; font-size: (9 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: root.pending-count > 9 ? "9+" : root.pending-count; color: (root.light-material ? #202024 : white); font-size: (9 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
                         TouchArea { clicked => { root.expand-notification(); } }
                     }
-                    QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - (94 * root.scaled-pixel); y: -(4 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (26 * root.scaled-pixel); glyph: root.pinned ? "\u{e840}" : "\u{e718}"; active: root.pinned; label: root.pinned ? "Unpin island" : "Pin island open"; clicked => { root.toggle-pin(); } }
-                    QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - (62 * root.scaled-pixel); y: -(4 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (26 * root.scaled-pixel); glyph: "\u{e713}"; label: "Open settings"; clicked => { root.settings-requested(); } }
-                    QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - (28 * root.scaled-pixel); y: -(4 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (26 * root.scaled-pixel); glyph: "\u{e711}"; label: "Close island"; clicked => { root.collapse(); } }
+                    QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - (94 * root.scaled-pixel); y: -(4 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (26 * root.scaled-pixel); glyph: root.pinned ? "\u{e840}" : "\u{e718}"; active: root.pinned; label: root.pinned ? "Unpin island" : "Pin island open"; clicked => { root.toggle-pin(); } }
+                    QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - (62 * root.scaled-pixel); y: -(4 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (26 * root.scaled-pixel); glyph: "\u{e713}"; label: "Open settings"; clicked => { root.settings-requested(); } }
+                    QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width - (28 * root.scaled-pixel); y: -(4 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (26 * root.scaled-pixel); glyph: "\u{e711}"; label: "Close island"; clicked => { root.collapse(); } }
 
                     if root.notification-mode && !root.battery-mode && !root.plugin-mode : Rectangle {
                         x: 0px; y: (28 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (104 * root.scaled-pixel);
-                        Artwork { ui-scale: root.ui-scale; x: 0px; y: 0px; width: (29 * root.scaled-pixel); height: (29 * root.scaled-pixel); artwork: root.notification-icon; has-artwork: root.has-notification-icon; placeholder-glyph: "\u{e7f4}"; }
-                        Text { x: (40 * root.scaled-pixel); y: 0px; width: (272 * root.scaled-pixel); height: (32 * root.scaled-pixel); color: white; font-size: (13 * root.font-pixel); font-weight: 600; text: root.notification-title; wrap: word-wrap; overflow: elide; }
-                        Text { x: 0px; y: (39 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (31 * root.scaled-pixel); color: #bfbfc8; font-size: (11 * root.font-pixel); text: root.notification-body; wrap: word-wrap; overflow: elide; }
-                        TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (80 * root.scaled-pixel); width: (120 * root.scaled-pixel); height: (25 * root.scaled-pixel); label: "Open app"; enabled: root.can-open-source; interaction(down) => { root.pointer-interaction(down); } clicked => { root.open-source(); } }
-                        TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: (132 * root.scaled-pixel); y: (80 * root.scaled-pixel); width: (180 * root.scaled-pixel); height: (25 * root.scaled-pixel); label: "Hide preview"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.hide-notification(); } }
+                        Artwork { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: 0px; width: (29 * root.scaled-pixel); height: (29 * root.scaled-pixel); artwork: root.notification-icon; has-artwork: root.has-notification-icon; placeholder-glyph: "\u{e7f4}"; }
+                        Text { x: (40 * root.scaled-pixel); y: 0px; width: (272 * root.scaled-pixel); height: (32 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (13 * root.font-pixel); font-weight: 600; text: root.notification-title; wrap: word-wrap; overflow: elide; }
+                        Text { x: 0px; y: (39 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (31 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #bfbfc8); font-size: (11 * root.font-pixel); text: root.notification-body; wrap: word-wrap; overflow: elide; }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (80 * root.scaled-pixel); width: (120 * root.scaled-pixel); height: (25 * root.scaled-pixel); label: "Open app"; enabled: root.can-open-source; interaction(down) => { root.pointer-interaction(down); } clicked => { root.open-source(); } }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (132 * root.scaled-pixel); y: (80 * root.scaled-pixel); width: (180 * root.scaled-pixel); height: (25 * root.scaled-pixel); label: "Hide preview"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.hide-notification(); } }
                     }
                     launcher-panel := Rectangle {
                         visible: !root.media-mode && !root.volume-mode && !root.notification-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode;
                         x: 0px; y: (35 * root.scaled-pixel); width: parent.width; height: (94 * root.scaled-pixel);
                         Rectangle {
                             x: 0px; y: 0px; width: (198 * root.scaled-pixel); height: (62 * root.scaled-pixel); border-radius: (8 * root.scaled-pixel);
-                            background: media-touch.has-hover ? #ffffff20 : #ffffff11;
-                            Artwork { ui-scale: root.ui-scale; x: (12 * root.scaled-pixel); y: (12 * root.scaled-pixel); width: (39 * root.scaled-pixel); height: (39 * root.scaled-pixel); artwork: root.artwork; has-artwork: root.has-artwork; }
-                            Text { x: (62 * root.scaled-pixel); y: (14 * root.scaled-pixel); width: (123 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: white; font-size: (12 * root.font-pixel); font-weight: 600; overflow: elide; text: root.media-available ? root.track-title : "No media session"; }
-                            Text { x: (62 * root.scaled-pixel); y: (35 * root.scaled-pixel); width: (123 * root.scaled-pixel); height: (16 * root.scaled-pixel); color: #a4a4ae; font-size: (10 * root.font-pixel); overflow: elide; text: root.media-available ? root.artist-name : "Open a music app"; }
+                            background: media-touch.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #00000011 : #ffffff11);
+                            Artwork { light-material: root.light-material; ui-scale: root.ui-scale; x: (12 * root.scaled-pixel); y: (12 * root.scaled-pixel); width: (39 * root.scaled-pixel); height: (39 * root.scaled-pixel); artwork: root.artwork; has-artwork: root.has-artwork; }
+                            Text { x: (62 * root.scaled-pixel); y: (14 * root.scaled-pixel); width: (123 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (12 * root.font-pixel); font-weight: 600; overflow: elide; text: root.media-available ? root.track-title : "No media session"; }
+                            Text { x: (62 * root.scaled-pixel); y: (35 * root.scaled-pixel); width: (123 * root.scaled-pixel); height: (16 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #a4a4ae); font-size: (10 * root.font-pixel); overflow: elide; text: root.media-available ? root.artist-name : "Open a music app"; }
                             media-touch := TouchArea { clicked => { root.open-media(); } }
                         }
                         launcher-volume-card := Rectangle {
                             x: (208 * root.scaled-pixel); y: 0px; width: (104 * root.scaled-pixel); height: (62 * root.scaled-pixel); border-radius: (8 * root.scaled-pixel);
-                            background: volume-touch.has-hover ? #ffffff20 : #ffffff11;
-                            Glyph { ui-scale: root.ui-scale; x: (12 * root.scaled-pixel); y: (13 * root.scaled-pixel); width: (22 * root.scaled-pixel); height: (22 * root.scaled-pixel); text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
-                            Text { x: (43 * root.scaled-pixel); y: (16 * root.scaled-pixel); width: (50 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: white; font-size: (13 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
-                            ProgressTrack { ui-scale: root.ui-scale; x: (13 * root.scaled-pixel); y: (48 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (4 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? #96969e : #e7e7eb; }
+                            background: volume-touch.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #00000011 : #ffffff11);
+                            Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (12 * root.scaled-pixel); y: (13 * root.scaled-pixel); width: (22 * root.scaled-pixel); height: (22 * root.scaled-pixel); text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
+                            Text { x: (43 * root.scaled-pixel); y: (16 * root.scaled-pixel); width: (50 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (13 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
+                            ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: (13 * root.scaled-pixel); y: (48 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (4 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e7e7eb); }
                             volume-touch := TouchArea { clicked => { root.open-volume(); } }
                         }
-                        Rectangle { x: 0px; y: (70 * root.scaled-pixel); width: root.battery-present ? (96 * root.scaled-pixel) : (150 * root.scaled-pixel); height: (22 * root.scaled-pixel); border-radius: (5 * root.scaled-pixel); background: timer-entry.has-hover ? #ffffff20 : #ffffff0c;
-                            Glyph { ui-scale: root.ui-scale; x: (9 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (12 * root.scaled-pixel); text: "\u{e916}"; color: #c5c5cd; }
-                            Text { x: (32 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: parent.width - (57 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (11 * root.font-pixel); color: #c5c5cd; overflow: elide; text: root.timer-running ? root.timer-label : "Timer"; }
-                            Glyph { ui-scale: root.ui-scale; x: parent.width - (27 * root.scaled-pixel); y: (4 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (15 * root.scaled-pixel); font-size: (10 * root.scaled-pixel); text: "\u{e76c}"; color: #bdbdc5; }
+                        Rectangle { x: 0px; y: (70 * root.scaled-pixel); width: root.battery-present ? (96 * root.scaled-pixel) : (150 * root.scaled-pixel); height: (22 * root.scaled-pixel); border-radius: (5 * root.scaled-pixel); background: timer-entry.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #0000000c : #ffffff0c);
+                            Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (9 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (12 * root.scaled-pixel); text: "\u{e916}"; color: (root.light-material ? #4b4b54 : #c5c5cd); }
+                            Text { x: (32 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: parent.width - (57 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (11 * root.font-pixel); color: (root.light-material ? #4b4b54 : #c5c5cd); overflow: elide; text: root.timer-running ? root.timer-label : "Timer"; }
+                            Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: parent.width - (27 * root.scaled-pixel); y: (4 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (15 * root.scaled-pixel); font-size: (10 * root.scaled-pixel); text: "\u{e76c}"; color: (root.light-material ? #4b4b54 : #bdbdc5); }
                             timer-entry := TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-timer(); } }
                         }
                         if root.battery-present : Rectangle {
                             x: (108 * root.scaled-pixel); y: (70 * root.scaled-pixel); width: (96 * root.scaled-pixel); height: (22 * root.scaled-pixel); border-radius: (5 * root.scaled-pixel);
-                            background: battery-entry.has-hover ? #ffffff20 : #ffffff0c;
-                            Glyph { ui-scale: root.ui-scale; x: (9 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (12 * root.scaled-pixel); text: "\u{e83f}"; color: #c5c5cd; }
-                            Text { x: (32 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: parent.width - (40 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (11 * root.font-pixel); color: #c5c5cd; text: root.battery-percent-label; }
+                            background: battery-entry.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #0000000c : #ffffff0c);
+                            Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (9 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (12 * root.scaled-pixel); text: "\u{e83f}"; color: (root.light-material ? #4b4b54 : #c5c5cd); }
+                            Text { x: (32 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: parent.width - (40 * root.scaled-pixel); height: (16 * root.scaled-pixel); font-size: (11 * root.font-pixel); color: (root.light-material ? #4b4b54 : #c5c5cd); text: root.battery-percent-label; }
                             battery-entry := TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-battery(); } }
                         }
                     }
@@ -550,7 +588,7 @@ export component IslandWindow inherits Window {
                             visible: root.lyrics-visible;
                             x: 0px; y: 0px; width: root.lyrics-column-width * root.scaled-pixel; height: parent.height;
                             clip: true;
-                            synced-lines := AnimatedLyrics { ui-scale: root.ui-scale; text-scale: root.text-scale;
+                            synced-lines := AnimatedLyrics { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale;
                                 visible: root.lyrics-available && root.lyrics-synced;
                                 width: parent.width; height: parent.height;
                                 rows: root.lyrics-rows; focused-text: root.lyrics-current;
@@ -563,26 +601,26 @@ export component IslandWindow inherits Window {
                                 x: 0px; y: 0px; width: parent.width; height: parent.height;
                                 content-width: self.width;
                                 content-height: max(self.height, plain-lyrics.preferred-height);
-                                plain-lyrics := Text { x: 0px; y: max(0px, (parent.height - self.height) / 2); width: parent.width; height: self.preferred-height; text: root.lyrics-plain; color: #dedee6; font-size: (14 * root.font-pixel); wrap: word-wrap; }
+                                plain-lyrics := Text { x: 0px; y: max(0px, (parent.height - self.height) / 2); width: parent.width; height: self.preferred-height; text: root.lyrics-plain; color: (root.light-material ? #202024 : #dedee6); font-size: (14 * root.font-pixel); wrap: word-wrap; }
                             }
                             if !root.lyrics-available : Rectangle {
                                 width: parent.width; height: parent.height;
-                                Glyph { ui-scale: root.ui-scale; x: 0px; y: (5 * root.scaled-pixel); width: (24 * root.scaled-pixel); height: (25 * root.scaled-pixel); font-size: (19 * root.scaled-pixel); color: #7e7e8a; text: "\u{e8d6}"; }
-                                Text { x: 0px; y: (43 * root.scaled-pixel); width: parent.width; height: (49 * root.scaled-pixel); text: root.lyrics-status; color: #b2b2be; font-size: (13 * root.font-pixel); wrap: word-wrap; overflow: elide; }
-                                TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (107 * root.scaled-pixel); width: (104 * root.scaled-pixel); height: (25 * root.scaled-pixel); visible: !root.lyrics-enabled || (root.media-available && !root.lyrics-loading); label: root.lyrics-enabled ? "Retry lyrics" : "Enable lyrics"; interaction(down) => { root.pointer-interaction(down); } clicked => { if root.lyrics-enabled { root.lyrics-retry(); } else { root.lyrics-enable(); } } }
+                                Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (5 * root.scaled-pixel); width: (24 * root.scaled-pixel); height: (25 * root.scaled-pixel); font-size: (19 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #7e7e8a); text: "\u{e8d6}"; }
+                                Text { x: 0px; y: (43 * root.scaled-pixel); width: parent.width; height: (49 * root.scaled-pixel); text: root.lyrics-status; color: (root.light-material ? #4b4b54 : #b2b2be); font-size: (13 * root.font-pixel); wrap: word-wrap; overflow: elide; }
+                                TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: (107 * root.scaled-pixel); width: (104 * root.scaled-pixel); height: (25 * root.scaled-pixel); visible: !root.lyrics-enabled || (root.media-available && !root.lyrics-loading); label: root.lyrics-enabled ? "Retry lyrics" : "Enable lyrics"; interaction(down) => { root.pointer-interaction(down); } clicked => { if root.lyrics-enabled { root.lyrics-retry(); } else { root.lyrics-enable(); } } }
                             }
                         }
-                        Rectangle { x: root.media-column-x * root.scaled-pixel - (12 * root.scaled-pixel); y: (4 * root.scaled-pixel); width: root.scaled-pixel; height: max(0px, parent.height - 12 * root.scaled-pixel); background: #ffffff16; visible: root.lyrics-visible; }
+                        Rectangle { x: root.media-column-x * root.scaled-pixel - (12 * root.scaled-pixel); y: (4 * root.scaled-pixel); width: root.scaled-pixel; height: max(0px, parent.height - 12 * root.scaled-pixel); background: (root.light-material ? #00000016 : #ffffff16); visible: root.lyrics-visible; }
                         Rectangle {
                             x: root.media-column-x * root.scaled-pixel; y: (parent.height - self.height) / 2; width: root.media-column-width * root.scaled-pixel; height: min(parent.height, 157 * root.scaled-pixel);
-                            Artwork { ui-scale: root.ui-scale; x: 0px; y: 0px; width: (56 * root.scaled-pixel); height: (56 * root.scaled-pixel); artwork: root.artwork; has-artwork: root.has-artwork; }
-                            Text { x: (69 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - (69 * root.scaled-pixel)); height: max(37, 36 * root.text-scale) * root.scaled-pixel; wrap: word-wrap; opacity: 1 - 0.22 * root.media-pulse; color: white; font-size: (15 * root.font-pixel); font-weight: 600; overflow: elide; text: root.media-available ? root.track-title : "No media session"; }
-                            Text { x: (69 * root.scaled-pixel); y: (max(37, 36 * root.text-scale) + 2) * root.scaled-pixel; width: max(0px, parent.width - (69 * root.scaled-pixel)); height: (21 * root.scaled-pixel); color: #aaaab4; font-size: (12 * root.font-pixel); overflow: elide; text: root.service-status != "" ? root.service-status : root.media-available ? root.artist-name : "Start playback in a supported app"; }
-                            QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width / 2 - (68 * root.scaled-pixel); y: (80 * root.scaled-pixel); width: (36 * root.scaled-pixel); height: (32 * root.scaled-pixel); glyph: "\u{e892}"; label: "Previous track"; enabled: root.media-available && root.can-previous; clicked => { root.previous(); } }
-                            PlaybackButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width / 2 - (21 * root.scaled-pixel); y: (76 * root.scaled-pixel); width: (42 * root.scaled-pixel); height: (37 * root.scaled-pixel); playing: root.playing; motion-enabled: root.media-motion-enabled && self.visible && ((root.compact-media && root.compact-reveal > 0.01) || (root.wide-media && root.reveal > 0.01)); motion-speed: root.animation-speed; label: root.playing ? "Pause playback" : "Play"; enabled: root.media-available && root.can-play-pause; clicked => { root.play-pause(); } }
-                            QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width / 2 + (32 * root.scaled-pixel); y: (80 * root.scaled-pixel); width: (36 * root.scaled-pixel); height: (32 * root.scaled-pixel); glyph: "\u{e893}"; label: "Next track"; enabled: root.media-available && root.can-next; clicked => { root.next(); } }
-                            Text { y: 113 * root.scaled-pixel; height: 14 * root.scaled-pixel; width: parent.width; font-size: 9 * root.font-pixel; color: #90909b; horizontal-alignment: center; text: root.duration-seconds <= 0 ? "Live / duration unavailable" : "Seeking unavailable in this player"; visible: root.media-available && (!root.can-seek || root.duration-seconds <= 0); overflow: elide; }
-                            ProgressTrack { ui-scale: root.ui-scale; x: 0px; y: (126 * root.scaled-pixel); width: parent.width; value: root.seeking ? root.seek-preview : root.progress; show-thumb: root.seeking; thumb-color: white; }
+                            Artwork { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: 0px; width: (56 * root.scaled-pixel); height: (56 * root.scaled-pixel); artwork: root.artwork; has-artwork: root.has-artwork; }
+                            Text { x: (69 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - (69 * root.scaled-pixel)); height: max(37, 36 * root.text-scale) * root.scaled-pixel; wrap: word-wrap; opacity: 1 - 0.22 * root.media-pulse; color: (root.light-material ? #202024 : white); font-size: (15 * root.font-pixel); font-weight: 600; overflow: elide; text: root.media-available ? root.track-title : "No media session"; }
+                            Text { x: (69 * root.scaled-pixel); y: (max(37, 36 * root.text-scale) + 2) * root.scaled-pixel; width: max(0px, parent.width - (69 * root.scaled-pixel)); height: (21 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (12 * root.font-pixel); overflow: elide; text: root.service-status != "" ? root.service-status : root.media-available ? root.artist-name : "Start playback in a supported app"; }
+                            QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width / 2 - (68 * root.scaled-pixel); y: (80 * root.scaled-pixel); width: (36 * root.scaled-pixel); height: (32 * root.scaled-pixel); glyph: "\u{e892}"; label: "Previous track"; enabled: root.media-available && root.can-previous; clicked => { root.previous(); } }
+                            PlaybackButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width / 2 - (21 * root.scaled-pixel); y: (76 * root.scaled-pixel); width: (42 * root.scaled-pixel); height: (37 * root.scaled-pixel); playing: root.playing; motion-enabled: root.media-motion-enabled && self.visible && ((root.compact-media && root.compact-reveal > 0.01) || (root.wide-media && root.reveal > 0.01)); motion-speed: root.animation-speed; label: root.playing ? "Pause playback" : "Play"; enabled: root.media-available && root.can-play-pause; clicked => { root.play-pause(); } }
+                            QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); } x: parent.width / 2 + (32 * root.scaled-pixel); y: (80 * root.scaled-pixel); width: (36 * root.scaled-pixel); height: (32 * root.scaled-pixel); glyph: "\u{e893}"; label: "Next track"; enabled: root.media-available && root.can-next; clicked => { root.next(); } }
+                            Text { y: 113 * root.scaled-pixel; height: 14 * root.scaled-pixel; width: parent.width; font-size: 9 * root.font-pixel; color: (root.light-material ? #4b4b54 : #90909b); horizontal-alignment: center; text: root.duration-seconds <= 0 ? "Live / duration unavailable" : "Seeking unavailable in this player"; visible: root.media-available && (!root.can-seek || root.duration-seconds <= 0); overflow: elide; }
+                            WavyProgress { light-material: root.light-material; wave: root.wave-path(self.width / root.scaled-pixel, self.value, root.wave-phase, 2 * root.wave-amplitude); ui-scale: root.ui-scale; x: 0px; y: (126 * root.scaled-pixel); width: parent.width; value: root.seeking ? root.seek-preview : root.progress; show-thumb: root.seeking; thumb-color: (root.light-material ? #202024 : white); }
                             seek-area := TouchArea {
                                 x: 0px; y: (116 * root.scaled-pixel); width: parent.width; height: (22 * root.scaled-pixel);
                                 enabled: root.media-available && root.can-seek && root.duration-seconds > 0;
@@ -603,25 +641,25 @@ export component IslandWindow inherits Window {
                                 }
                                 moved => { if self.pressed { root.seek-preview = min(1, max(0, self.mouse-x / self.width)); } }
                             }
-                            Text { x: 0px; y: (140 * root.scaled-pixel); width: (60 * root.scaled-pixel); height: (17 * root.scaled-pixel); color: #aaaab4; font-size: (9 * root.font-pixel); text: root.seeking ? floor(root.seek-preview * root.duration-seconds / 60) + ":" + (mod(floor(root.seek-preview * root.duration-seconds), 60) < 10 ? "0" : "") + mod(floor(root.seek-preview * root.duration-seconds), 60) : root.elapsed-label; }
-                            Text { x: parent.width - (60 * root.scaled-pixel); y: (140 * root.scaled-pixel); width: (60 * root.scaled-pixel); height: (17 * root.scaled-pixel); horizontal-alignment: right; color: #aaaab4; font-size: (9 * root.font-pixel); text: root.duration-seconds > 0 ? root.duration-label : "—"; }
+                            Text { x: 0px; y: (140 * root.scaled-pixel); width: (60 * root.scaled-pixel); height: (17 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (9 * root.font-pixel); text: root.seeking ? floor(root.seek-preview * root.duration-seconds / 60) + ":" + (mod(floor(root.seek-preview * root.duration-seconds), 60) < 10 ? "0" : "") + mod(floor(root.seek-preview * root.duration-seconds), 60) : root.elapsed-label; }
+                            Text { x: parent.width - (60 * root.scaled-pixel); y: (140 * root.scaled-pixel); width: (60 * root.scaled-pixel); height: (17 * root.scaled-pixel); horizontal-alignment: right; color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (9 * root.font-pixel); text: root.duration-seconds > 0 ? root.duration-label : "—"; }
                         }
                     }
 
                     volume-panel := Rectangle {
                         visible: root.volume-mode && !root.notification-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode;
                         x: 0px; y: (33 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (96 * root.scaled-pixel);
-                        QuietButton { ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); }
+                        QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; interaction(down) => { root.pointer-interaction(down); }
                             x: -root.scaled-pixel; y: -(2 * root.scaled-pixel); width: (40 * root.scaled-pixel); height: (40 * root.scaled-pixel);
                             glyph: root.volume-muted ? "\u{e74f}" : "\u{e767}";
                             label: root.volume-muted ? "Unmute output" : "Mute output";
                             enabled: root.volume-available;
                             clicked => { root.toggle-mute(); }
                         }
-                        Text { x: (52 * root.scaled-pixel); y: root.scaled-pixel; width: (165 * root.scaled-pixel); height: (29 * root.scaled-pixel); color: white; font-size: (16 * root.font-pixel); font-weight: 600; text: root.volume-muted ? "Muted" : "Output volume"; }
-                        Text { x: (52 * root.scaled-pixel); y: (32 * root.scaled-pixel); width: (165 * root.scaled-pixel); height: (21 * root.scaled-pixel); overflow: elide; color: #aaaab4; font-size: (11 * root.font-pixel); text: root.volume-available ? "Default Windows output" : "No output device available"; }
-                        Text { x: (224 * root.scaled-pixel); y: root.scaled-pixel; width: (88 * root.scaled-pixel); height: (42 * root.scaled-pixel); horizontal-alignment: right; color: white; font-size: (23 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
-                        ProgressTrack { ui-scale: root.ui-scale; x: 0px; y: (62 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (6 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? #96969e : #e4e4ea; show-thumb: true; thumb-size: (12 * root.scaled-pixel); thumb-color: root.volume-available ? white : #96969e; }
+                        Text { x: (52 * root.scaled-pixel); y: root.scaled-pixel; width: (165 * root.scaled-pixel); height: (29 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (16 * root.font-pixel); font-weight: 600; text: root.volume-muted ? "Muted" : "Output volume"; }
+                        Text { x: (52 * root.scaled-pixel); y: (32 * root.scaled-pixel); width: (165 * root.scaled-pixel); height: (21 * root.scaled-pixel); overflow: elide; color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (11 * root.font-pixel); text: root.volume-available ? "Default Windows output" : "No output device available"; }
+                        Text { x: (224 * root.scaled-pixel); y: root.scaled-pixel; width: (88 * root.scaled-pixel); height: (42 * root.scaled-pixel); horizontal-alignment: right; color: (root.light-material ? #202024 : white); font-size: (23 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
+                        ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (62 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (6 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e4e4ea); show-thumb: true; thumb-size: (12 * root.scaled-pixel); thumb-color: root.volume-available ? (root.light-material ? #202024 : white) : (root.light-material ? #4b4b54 : #96969e); }
                         volume-slider := TouchArea {
                             x: 0px; y: (49 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (31 * root.scaled-pixel);
                             enabled: root.volume-available;
@@ -629,39 +667,40 @@ export component IslandWindow inherits Window {
                             clicked => { root.volume-change(round(min(100, max(0, self.mouse-x / self.width * 100)))); }
                             moved => { if self.pressed { root.volume-change(round(min(100, max(0, self.mouse-x / self.width * 100)))); } }
                         }
-                        Text { x: 0px; y: (83 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (17 * root.scaled-pixel); overflow: elide; color: #a8a8b2; font-size: (9 * root.font-pixel); text: root.service-status == "" ? "Drag to adjust · tap speaker to mute" : root.service-status; }
+                        Text { x: 0px; y: (83 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (17 * root.scaled-pixel); overflow: elide; color: (root.light-material ? #4b4b54 : #a8a8b2); font-size: (9 * root.font-pixel); text: root.service-status == "" ? "Drag to adjust · tap speaker to mute" : root.service-status; }
                     }
 
                     if root.battery-mode : Rectangle {
                         x: 0px; y: (30 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (110 * root.scaled-pixel);
-                        Glyph { ui-scale: root.ui-scale; x: 0px; y: (2 * root.scaled-pixel); width: (49 * root.scaled-pixel); height: (42 * root.scaled-pixel); font-size: (35 * root.scaled-pixel); text: "\u{e83f}"; color: #dedee5; }
-                        Text { x: (65 * root.scaled-pixel); y: 0px; width: (247 * root.scaled-pixel); height: (54 * root.scaled-pixel); text: root.battery-percent-label; color: white; font-size: (30 * root.font-pixel); font-weight: 600; }
-                        Text { x: (65 * root.scaled-pixel); y: (55 * root.scaled-pixel); width: (247 * root.scaled-pixel); height: (22 * root.scaled-pixel); text: root.battery-power-label; color: #b8b8c1; font-size: (12 * root.font-pixel); overflow: elide; }
-                        ProgressTrack { ui-scale: root.ui-scale; x: 0px; y: (82 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (5 * root.scaled-pixel); value: root.battery-level; fill-color: #dcdce4; }
-                        Text { x: 0px; y: (93 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (17 * root.scaled-pixel); text: "System battery · updated by Windows"; color: #92929f; font-size: (9 * root.font-pixel); }
+                        ChargingIcon { light-material: root.light-material; burst: root.illustration-motion && root.charge-connecting ? root.charge-intensity : 0; ui-scale: root.ui-scale; x: 0px; y: (2 * root.scaled-pixel); width: (49 * root.scaled-pixel); height: (42 * root.scaled-pixel); font-size: (35 * root.scaled-pixel); ink: root.battery-accent; }
+                        Text { x: (65 * root.scaled-pixel); y: 0px; width: (247 * root.scaled-pixel); height: (54 * root.scaled-pixel); text: root.battery-percent-label; color: (root.light-material ? #202024 : white); font-size: (30 * root.font-pixel); font-weight: 600; }
+                        Text { x: (65 * root.scaled-pixel); y: (55 * root.scaled-pixel); width: (247 * root.scaled-pixel); height: (22 * root.scaled-pixel); text: root.battery-power-label; color: (root.light-material ? #4b4b54 : #b8b8c1); font-size: (12 * root.font-pixel); overflow: elide; }
+                        ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (82 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (5 * root.scaled-pixel); value: root.battery-level; fill-color: root.battery-accent; }
+                        Text { x: 0px; y: (93 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (17 * root.scaled-pixel); text: "System battery · updated by Windows"; color: (root.light-material ? #4b4b54 : #92929f); font-size: (9 * root.font-pixel); }
                     }
                     if root.timer-mode && !root.notification-mode && !root.battery-mode && !root.plugin-mode : Rectangle {
                         x: 0px; y: (28 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (116 * root.scaled-pixel);
                         private property <length> heading-height: max(37, 39 * root.text-scale) * root.scaled-pixel;
-                        Text { x: 0px; y: 0px; width: (176 * root.scaled-pixel); height: parent.heading-height; overflow: elide; text: root.timer-finished ? "Time is up" : root.timer-label; color: root.timer-finished ? #f1d795 : white; font-size: root.timer-finished ? (26 * root.font-pixel) : (31 * root.font-pixel); font-weight: 600; }
-                        TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: (184 * root.scaled-pixel); y: (5 * root.scaled-pixel); width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "−"; enabled: !root.timer-running && root.timer-draft-minutes > 1; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes - 1); } }
-                        Text { x: (210 * root.scaled-pixel); y: (6 * root.scaled-pixel); width: (76 * root.scaled-pixel); height: (23 * root.scaled-pixel); text: root.timer-draft-minutes + " min"; color: #c3c3cc; font-size: (11 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
-                        TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: (287 * root.scaled-pixel); y: (5 * root.scaled-pixel); width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "+"; enabled: !root.timer-running && root.timer-draft-minutes < 1440; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes + 1); } }
-                        ProgressTrack { ui-scale: root.ui-scale; x: 0px; y: parent.heading-height + 2 * root.scaled-pixel; width: (312 * root.scaled-pixel); height: (2 * root.scaled-pixel); value: root.timer-progress; track-color: #ffffff20; fill-color: root.timer-finished ? #f1d795 : #d5d5df; }
-                        for minutes[index] in [1, 5, 15] : TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale;
+                        Text { visible: root.timer-finished; opacity: 1 - root.timer-roll; x: 0px; y: 0px; width: (176 * root.scaled-pixel); height: parent.heading-height; overflow: elide; text: "Time is up"; color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : white); font-size: root.timer-finished ? (26 * root.font-pixel) : (31 * root.font-pixel); font-weight: 600; }
+                        RollingTime { light-material: root.light-material; digits: root.timer-digits; roll: root.timer-roll; visible: !root.timer-finished || root.timer-roll > 0.001; x: 0px; y: 0px; width: (176 * root.scaled-pixel); height: parent.heading-height;   ink: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : white); font-size: root.timer-finished ? (26 * root.font-pixel) : (31 * root.font-pixel);  }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (184 * root.scaled-pixel); y: (5 * root.scaled-pixel); width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "−"; enabled: !root.timer-running && root.timer-draft-minutes > 1; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes - 1); } }
+                        Text { x: (210 * root.scaled-pixel); y: (6 * root.scaled-pixel); width: (76 * root.scaled-pixel); height: (23 * root.scaled-pixel); text: root.timer-draft-minutes + " min"; color: (root.light-material ? #4b4b54 : #c3c3cc); font-size: (11 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (287 * root.scaled-pixel); y: (5 * root.scaled-pixel); width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "+"; enabled: !root.timer-running && root.timer-draft-minutes < 1440; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes + 1); } }
+                        ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: parent.heading-height + 2 * root.scaled-pixel; width: (312 * root.scaled-pixel); height: (2 * root.scaled-pixel); value: root.timer-progress; track-color: (root.light-material ? #00000020 : #ffffff20); fill-color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : #d5d5df); }
+                        for minutes[index] in [1, 5, 15] : TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale;
                             x: index * (59 * root.scaled-pixel); y: parent.heading-height + 10 * root.scaled-pixel; width: (52 * root.scaled-pixel); height: (20 * root.scaled-pixel);
                             label: minutes + " min"; enabled: !root.timer-running;
                             interaction(down) => { root.pointer-interaction(down); }
                             clicked => { root.configure-timer(minutes); }
                         }
-                        Text { x: (182 * root.scaled-pixel); y: parent.heading-height + 10 * root.scaled-pixel; width: (130 * root.scaled-pixel); height: (18 * root.scaled-pixel); text: root.timer-running ? "Counting down" : root.timer-finished ? "Timer complete" : root.timer-paused ? "Paused" : "Ready when you are"; color: #9999a7; font-size: (10 * root.font-pixel); horizontal-alignment: right; }
-                        TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: parent.heading-height + 34 * root.scaled-pixel; width: (150 * root.scaled-pixel); height: (27 * root.scaled-pixel); label: root.timer-running ? "Pause" : root.timer-finished ? "Restart" : root.timer-paused ? "Resume" : "Start"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-toggle(); } }
-                        TextButton { ui-scale: root.ui-scale; text-scale: root.text-scale; x: (162 * root.scaled-pixel); y: parent.heading-height + 34 * root.scaled-pixel; width: (150 * root.scaled-pixel); height: (27 * root.scaled-pixel); label: "Reset"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-reset(); } }
+                        Text { x: (182 * root.scaled-pixel); y: parent.heading-height + 10 * root.scaled-pixel; width: (130 * root.scaled-pixel); height: (18 * root.scaled-pixel); text: root.timer-running ? "Counting down" : root.timer-finished ? "Timer complete" : root.timer-paused ? "Paused" : "Ready when you are"; color: (root.light-material ? #4b4b54 : #9999a7); font-size: (10 * root.font-pixel); horizontal-alignment: right; }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: parent.heading-height + 34 * root.scaled-pixel; width: (150 * root.scaled-pixel); height: (27 * root.scaled-pixel); label: root.timer-running ? "Pause" : root.timer-finished ? "Restart" : root.timer-paused ? "Resume" : "Start"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-toggle(); } }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (162 * root.scaled-pixel); y: parent.heading-height + 34 * root.scaled-pixel; width: (150 * root.scaled-pixel); height: (27 * root.scaled-pixel); label: "Reset"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-reset(); } }
                     }
 
                     if root.player-picker-open && root.media-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode : Rectangle {
                         x: root.media-column-x * root.scaled-pixel; y: (26 * root.scaled-pixel); width: root.media-column-width * root.scaled-pixel; height: (162 * root.scaled-pixel);
-                        border-radius: (6 * root.scaled-pixel); background: #17171b; border-width: root.scaled-pixel; border-color: #ffffff22;
+                        border-radius: (6 * root.scaled-pixel); background: (root.light-material ? #f0f0f4 : #17171b); border-width: root.scaled-pixel; border-color: #ffffff22;
                         clip: true;
                         Flickable {
                             x: (4 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: max(0px, parent.width - (8 * root.scaled-pixel)); height: parent.height - (6 * root.scaled-pixel);
@@ -669,15 +708,15 @@ export component IslandWindow inherits Window {
                             content-height: max(self.height, (root.media-players.length + 1) * (28 * root.scaled-pixel));
                             Rectangle {
                                 x: 0px; y: 0px; width: parent.width; height: (28 * root.scaled-pixel); border-radius: (4 * root.scaled-pixel);
-                                background: auto-choice.has-hover ? #ffffff18 : transparent;
-                                Text { x: (9 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - (18 * root.scaled-pixel)); height: (28 * root.scaled-pixel); text: "Automatic · follow playback"; color: #d8d8e1; font-size: (11 * root.font-pixel); overflow: elide; vertical-alignment: center; }
+                                background: auto-choice.has-hover ? (root.light-material ? #00000018 : #ffffff18) : transparent;
+                                Text { x: (9 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - (18 * root.scaled-pixel)); height: (28 * root.scaled-pixel); text: "Automatic · follow playback"; color: (root.light-material ? #202024 : #d8d8e1); font-size: (11 * root.font-pixel); overflow: elide; vertical-alignment: center; }
                                 auto-choice := TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.player-picker-open = false; root.choose-player(""); } }
                             }
                             for player[index] in root.media-players : Rectangle {
                                 x: 0px; y: (index + 1) * (28 * root.scaled-pixel); width: parent.width; height: (28 * root.scaled-pixel); border-radius: (4 * root.scaled-pixel);
-                                background: player-choice.has-hover ? #ffffff18 : transparent;
-                                Text { x: (9 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - (43 * root.scaled-pixel)); height: (28 * root.scaled-pixel); text: player.label; color: white; font-size: (11 * root.font-pixel); overflow: elide; vertical-alignment: center; }
-                                Glyph { ui-scale: root.ui-scale; x: parent.width - (28 * root.scaled-pixel); y: (7 * root.scaled-pixel); width: (17 * root.scaled-pixel); height: (15 * root.scaled-pixel); text: player.playing ? "\u{e768}" : "\u{e769}"; font-size: (9 * root.scaled-pixel); color: #a6a6b3; }
+                                background: player-choice.has-hover ? (root.light-material ? #00000018 : #ffffff18) : transparent;
+                                Text { x: (9 * root.scaled-pixel); y: 0px; width: max(0px, parent.width - (43 * root.scaled-pixel)); height: (28 * root.scaled-pixel); text: player.label; color: (root.light-material ? #202024 : white); font-size: (11 * root.font-pixel); overflow: elide; vertical-alignment: center; }
+                                Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: parent.width - (28 * root.scaled-pixel); y: (7 * root.scaled-pixel); width: (17 * root.scaled-pixel); height: (15 * root.scaled-pixel); text: player.playing ? "\u{e768}" : "\u{e769}"; font-size: (9 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #a6a6b3); }
                                 player-choice := TouchArea { changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.player-picker-open = false; root.choose-player(player.id); } }
                             }
                         }

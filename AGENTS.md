@@ -23,6 +23,7 @@ The user explicitly rejected engine branding, repeated Enter/Copy labels, perman
 
 Distinguish empty, incomplete input, pending work, successful result and actionable failure.
 
+- Always use apply_patch if you're Codex or ChatGPT model.
 - `3+`, `sin(` and an unfinished conversion are normal typing states. They must not show a result card, loading message or error. Accept input quietly.
 - Do not show progress for debounce or a quick local calculation. Show an answer when one exists, not an empty answer card.
 - For genuinely slow operations, use at most one restrained, delayed indication, only when useful. Never duplicate loading text or create perpetual animation. Stop feedback on completion, cancellation and dismissal.

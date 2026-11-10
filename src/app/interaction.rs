@@ -1,5 +1,6 @@
 //! Hover intent, pointer gestures, and countdown GUI scheduling.
 use super::*;
+use slint::Model;
 
 pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     {
@@ -221,7 +222,9 @@ pub(super) fn refresh_pointer(app: &Rc<RefCell<App>>) {
         let mut a = app.borrow_mut();
         a.pointer = observed.map(|pointer| pointer.client);
         observed.is_some_and(|pointer| {
-            pointer.on_window
+            !a.hidden
+                && !a.visibility.hiding
+                && pointer.on_window
                 && crate::gestures::contains_in_canvas(
                     pointer.client.0,
                     pointer.client.1,
@@ -371,7 +374,20 @@ pub(super) fn sync_countdown(app: &Rc<RefCell<App>>) {
         a.coordinator.set_timer(active, finished, now);
         if let Some(ui) = a.ui.upgrade() {
             ui.set_timer_draft_minutes(snapshot.duration_seconds.div_ceil(60) as i32);
-            ui.set_timer_label(time_label(snapshot.remaining_seconds as f64).into());
+            let label = time_label(snapshot.remaining_seconds as f64);
+            let previous = ui.get_timer_label();
+            let animate =
+                snapshot.running && ui.get_timer_seconds() == snapshot.remaining_seconds as i32 + 1;
+            let cells = time_label(snapshot.duration_seconds as f64).len();
+            if previous.as_str() != label || ui.get_timer_digits().row_count() == 0 {
+                ui.set_timer_digits(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    illustrations::digits(previous.as_str(), &label, cells),
+                ))));
+                ui.set_timer_digit_animate(animate);
+                ui.set_timer_step(ui.get_timer_step() + 1.);
+            }
+            ui.set_timer_seconds(snapshot.remaining_seconds as i32);
+            ui.set_timer_label(label.into());
             ui.set_timer_running(snapshot.running);
             ui.set_timer_paused(active && !snapshot.running && !snapshot.finished);
             ui.set_timer_finished(snapshot.finished);

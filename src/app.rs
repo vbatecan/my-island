@@ -1,9 +1,13 @@
 mod artwork;
+mod battery_effect;
 mod battery_verification;
 mod contracted_verification;
+mod illustration_verification;
+mod illustrations;
 mod interaction;
 mod launcher;
 mod layout_verification;
+mod liquid_verification;
 mod lyrics;
 mod lyrics_verification;
 mod material;
@@ -17,6 +21,7 @@ mod settings_ui;
 mod size_verification;
 mod startup;
 mod verification;
+mod visibility;
 mod volume;
 
 use interaction::handle_overlay_input;
@@ -86,11 +91,13 @@ struct App {
     media_position: (f64, f64, Instant),
     glass: RefCell<Glass>,
     capture: Option<platform::capture::CaptureService>,
-    incoming_frame: Arc<Mutex<Option<Backdrop>>>,
+    incoming_frame: Arc<Mutex<Option<material::SnapshotReply>>>,
+    capture_generation: Arc<std::sync::atomic::AtomicU64>,
     frame_scheduled: Arc<AtomicBool>,
     preferences: slint::Weak<SettingsWindow>,
     coordinator: PresentationCoordinator,
     presentation: Option<Presentation>,
+    observed_activity: Option<Content>,
     pending_presentation: Option<Presentation>,
     rendered_presentation: Option<Presentation>,
     epoch: Instant,
@@ -107,6 +114,7 @@ struct App {
     countdown_timer: slint::Timer,
     countdown_engaged: bool,
     hidden: bool,
+    visibility: visibility::Visibility,
     settings_visible: bool,
     settings_sync: bool,
     attached: bool,
@@ -118,6 +126,12 @@ struct App {
     metrics: Rc<crate::metrics::RenderMetrics>,
     battery: crate::services::battery::BatterySnapshot,
     battery_detector: crate::services::battery::BatteryDetector,
+    battery_effect: battery_effect::Effect,
+    battery_effect_frames: slint::Timer,
+    battery_effect_expiry: slint::Timer,
+}
+pub(crate) fn verification_isolated_material() -> bool {
+    verification::enabled() && verification::has_arg("--isolated-material-probe")
 }
 impl App {
     fn now(&self) -> u64 {
@@ -145,16 +159,20 @@ impl App {
             spring.config.damping = self.settings.bounce.damping(collapsing);
         }
 
-        let geometry = [
-            g.width
-                + if state == IslandState::Idle && self.hover {
-                    4.0
-                } else {
-                    0.0
-                },
-            g.height,
-            g.radius,
-        ];
+        let geometry = if self.visibility.hiding {
+            [1., 0.1, 0.]
+        } else {
+            [
+                g.width
+                    + if state == IslandState::Idle && self.hover {
+                        4.0
+                    } else {
+                        0.0
+                    },
+                g.height,
+                g.radius,
+            ]
+        };
         // Give departing content a short head start. Keep the old geometry
         // target meanwhile; none of the springs lose their current momentum.
         if g.height < self.springs[1].position
@@ -334,6 +352,12 @@ impl App {
             || self.pending_content.is_some()
             || self.pending_compact.is_some();
         self.render();
+        if !active && self.visibility.hiding {
+            self.hidden = true;
+            self.media_clock.stop();
+            self.capture.take();
+            platform::set_overlay_visible(false);
+        }
         self.frames += 1;
         if !active && self.verification {
             record(&format!(
@@ -346,6 +370,9 @@ impl App {
         active
     }
     fn render(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_illustration_visible(!self.hidden && !self.visibility.hiding);
+        }
         if self.hidden {
             return;
         }
@@ -383,6 +410,9 @@ impl App {
             });
             ui.set_tint_opacity(self.settings.opacity);
             ui.set_material_name(self.settings.appearance.name().into());
+            if self.settings.appearance == Appearance::LiquidGlass {
+                ui.window().request_redraw();
+            }
             if matches!(
                 self.settings.appearance,
                 Appearance::Acrylic | Appearance::Glass | Appearance::LiveGlass
@@ -402,8 +432,11 @@ impl App {
                     self.canvas_size.0,
                 );
                 ui.set_glass_texture(image);
-                ui.set_has_glass_texture(true);
-            } else {
+                ui.set_has_glass_texture(
+                    self.settings.appearance != Appearance::LiquidGlass
+                        || self.glass.borrow().backdrop.is_some(),
+                );
+            } else if self.settings.appearance != Appearance::LiquidGlass {
                 ui.set_glass_texture(slint::Image::default());
                 ui.set_has_glass_texture(false);
             }
@@ -573,10 +606,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         glass: RefCell::new(Glass::default()),
         capture: None,
         incoming_frame: Arc::new(Mutex::new(None)),
+        capture_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         frame_scheduled: Arc::new(AtomicBool::new(false)),
         preferences: preferences.as_weak(),
         coordinator,
         presentation: None,
+        observed_activity: None,
         pending_presentation: None,
         rendered_presentation: None,
         epoch: Instant::now(),
@@ -593,6 +628,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         countdown_timer: slint::Timer::default(),
         countdown_engaged: false,
         hidden: false,
+        visibility: visibility::Visibility::default(),
         settings_visible: false,
         settings_sync: false,
         attached: false,
@@ -604,8 +640,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         metrics: Rc::new(crate::metrics::RenderMetrics::default()),
         battery: crate::services::battery::BatterySnapshot::default(),
         battery_detector: crate::services::battery::BatteryDetector::default(),
+        battery_effect: battery_effect::Effect::default(),
+        battery_effect_frames: slint::Timer::default(),
+        battery_effect_expiry: slint::Timer::default(),
     }));
-    verification::install_metrics(&app, &ui);
+    material::install_renderer(&app, &ui);
+    crate::preferences::install_preview_renderer(&preferences);
     app.borrow().render();
     {
         let app = app.clone();
@@ -672,49 +712,55 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::HotkeyToggle => user_toggle(&event_app),
             Event::LauncherToggle => launcher::toggle(&event_app),
-            Event::DesktopPolicyChanged(hidden) => {
-                if hidden == event_app.borrow().hidden {
-                    // External foreground/z-order changes can move a window over
-                    // a stationary pointer. Reconcile without rebuilding capture
-                    // or rescheduling presentation when visibility did not change.
-                    interaction::refresh_pointer(&event_app);
-                    return;
-                }
-                if hidden && event_app.borrow().launcher.open {
-                    launcher::dismiss(&event_app, false);
-                }
-                let old = {
+            Event::EdgeHover(inside) => {
+                {
                     let mut a = event_app.borrow_mut();
-                    a.hidden = hidden;
-                    let now = a.now();
-                    let suppress = hidden || a.settings_visible;
-                    a.coordinator.suppress(suppress, now);
-                    if hidden {
-                        if let Some(ui) = a.ui.upgrade() {
-                            ui.set_media_motion_enabled(false);
+                    if !a.visibility.covered || a.visibility.locked {
+                        return;
+                    }
+                    a.visibility.edge_hover = inside;
+                    if inside {
+                        if a.hidden || a.visibility.hiding {
+                            a.visibility.preview = None;
                         }
+                        let delay = u64::from(a.settings.collapse_delay.max(600));
+                        a.visibility.until = Some(a.now() + delay);
+                    }
+                }
+                sync_presentation(&event_app);
+            }
+            Event::DesktopPolicyChanged { covered, locked } => {
+                let changed = {
+                    let mut a = event_app.borrow_mut();
+                    let changed = a.visibility.covered != covered || a.visibility.locked != locked;
+                    a.visibility.covered = covered;
+                    a.visibility.locked = locked;
+                    if changed {
+                        a.visibility.edge_hover = false;
+                        a.visibility.until = None;
+                        a.visibility.remaining = None;
+                        a.visibility.preview = None;
                         a.hover = false;
-                        a.pointer = None;
                         a.pointer_pressed = false;
                         a.hover_intent.leave();
                         a.hover_timer.stop();
                         a.collapse_timer.stop();
+                        let now = a.now();
                         a.coordinator.set_hover(false, now);
-                        a.coordinator.close_hover(now);
-                        a.timer.stop();
-                        a.media_clock.stop();
-                        a.capture.take()
-                    } else {
-                        None
+                        a.coordinator.close(now);
+                        let suppressed = locked || a.settings_visible;
+                        a.coordinator.suppress(suppressed, now);
                     }
+                    changed
                 };
-                drop(old);
-                if !hidden {
-                    configure_material(&event_app);
+                if changed {
+                    if event_app.borrow().launcher.open {
+                        launcher::dismiss(&event_app, false);
+                    }
+                    sync_presentation(&event_app);
+                } else {
+                    interaction::refresh_pointer(&event_app);
                 }
-                sync_presentation(&event_app);
-                sync_media_clock(&event_app);
-                interaction::refresh_pointer(&event_app);
             }
         }
     }));
@@ -791,6 +837,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     notification_bridge::wire(&app, &ui);
     ui.show()?;
     app.borrow().render();
+    ui.on_wave_path(|w, v, p, a| illustrations::wave(w, v, p, a).into());
     let _verification_timer = verification::setup(&app);
     slint::run_event_loop()?;
     if app.borrow().verification {
@@ -804,6 +851,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
+    if state == IslandState::Idle {
+        battery_effect::cancel(app);
+    }
     if state == IslandState::AppLauncher {
         launcher::toggle(app);
         return;
@@ -819,6 +869,13 @@ fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
         let now = a.now();
         match state {
             IslandState::Idle => {
+                a.visibility.edge_hover = false;
+                if a.visibility.covered {
+                    a.visibility.until = None;
+                    a.visibility.remaining = None;
+                    a.hover = false;
+                    a.pointer_pressed = false;
+                }
                 a.coordinator.close(now);
                 // An explicit collapse consumes this hover visit. Require a
                 // fresh entry before automatically opening again.
@@ -839,6 +896,9 @@ fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
 }
 
 fn user_toggle(app: &Rc<RefCell<App>>) {
+    if app.borrow().coordinator.panel_open() {
+        battery_effect::cancel(app);
+    }
     if app.borrow().launcher.open {
         launcher::dismiss(app, true);
         return;
@@ -913,10 +973,67 @@ fn apply_content_properties(ui: &IslandWindow, view: &Presentation, settings: &S
 }
 
 fn sync_presentation(app: &Rc<RefCell<App>>) {
-    let (changed, state, deadline, panel, ui, hidden) = {
+    let (changed, state, deadline, panel, ui, hidden, revealing) = {
         let mut a = app.borrow_mut();
         let now = a.now();
-        let view = a.coordinator.view(now);
+        let mut view = a.coordinator.view(now);
+        let transient = matches!(
+            view.content,
+            Content::Notification(..)
+                | Content::Volume
+                | Content::CompactBattery(_)
+                | Content::CompactPlugin(_)
+                | Content::TimerFinished
+        );
+        let fresh = a
+            .observed_activity
+            .as_ref()
+            .is_some_and(|old| *old != view.content);
+        a.observed_activity = Some(view.content.clone());
+        if transient && fresh && a.visibility.covered && !a.visibility.locked {
+            a.visibility.until = Some(now + 3000);
+            a.visibility.preview = Some(if matches!(view.content, Content::TimerFinished) {
+                Content::CompactTimer
+            } else {
+                view.content.clone()
+            });
+        }
+        if a.visibility.covered && matches!(view.content, Content::TimerFinished) {
+            view.content = Content::CompactTimer;
+        }
+        if a.visibility.covered
+            && (a.visibility.until.is_some_and(|end| end > now) || a.visibility.remaining.is_some())
+            && !a.coordinator.panel_open()
+            && !transient
+            && let Some(preview) = &a.visibility.preview
+        {
+            view.content = preview.clone();
+        }
+        let engaged =
+            a.hover || a.pointer_pressed || a.coordinator.panel_open() || a.visibility.edge_hover;
+        a.visibility.pause(now, engaged);
+        let hide = a.visibility.should_hide(now, engaged);
+        let visibility_changed = a.visibility.hiding != hide;
+        a.visibility.hiding = hide;
+        if !hide && a.hidden {
+            for (spring, value) in a.springs.iter_mut().zip([1., 0.1, 0., 0., 0.]) {
+                spring.snap(value);
+            }
+            a.hidden = false;
+            a.render();
+            platform::set_overlay_visible(true);
+        }
+        if a.visibility.locked {
+            a.hidden = true;
+            a.timer.stop();
+            a.metrics.active(false);
+            a.media_clock.stop();
+            a.capture.take();
+            platform::set_overlay_visible(false);
+        }
+        if hide {
+            view.content = Content::Idle;
+        }
         let changed = a
             .presentation
             .as_ref()
@@ -928,6 +1045,7 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
         let panel = a.coordinator.panel_open() && !a.settings_visible && !a.hidden;
         let ui = a.ui.upgrade();
         if let Some(ui) = &ui {
+            ui.set_illustration_visible(!a.hidden && !a.visibility.hiding && !a.settings_visible);
             ui.set_pending_count(view.pending as i32);
             ui.set_volume_feedback(view.volume_chip);
             ui.set_pinned(a.coordinator.pinned());
@@ -940,14 +1058,24 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
         }
         a.presentation = Some(view);
         (
-            changed,
+            changed || visibility_changed,
             state,
-            a.coordinator.next_deadline(now),
+            [
+                a.coordinator.next_deadline(now),
+                a.visibility.until.filter(|end| *end > now),
+            ]
+            .into_iter()
+            .flatten()
+            .min(),
             panel,
             ui,
             a.hidden,
+            visibility_changed && !hide,
         )
     };
+    if revealing {
+        configure_material(app);
+    }
     if app.borrow().attached
         && let Err(e) = platform::set_panel_open(panel)
     {
@@ -986,10 +1114,17 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
             },
         );
     }
+    if app.borrow().visibility.hiding && !app.borrow().animations_enabled() {
+        let mut a = app.borrow_mut();
+        a.hidden = true;
+        a.capture.take();
+        platform::set_overlay_visible(false);
+    }
     if ui.is_some() {
         sync_media_clock(app);
     }
     lyrics::sync(app, false);
+    battery_effect::sync(app);
 }
 
 fn status(app: &Rc<RefCell<App>>, message: &str) {
@@ -1004,6 +1139,8 @@ fn apply_battery_properties(
     label: &str,
 ) {
     ui.set_battery_present(snapshot.present);
+    ui.set_battery_power_connected(snapshot.power_connected());
+    ui.set_battery_level_known(snapshot.percent.is_some());
     ui.set_battery_percent_label(
         snapshot
             .percent
@@ -1034,6 +1171,15 @@ fn update_battery(app: &Rc<RefCell<App>>, snapshot: crate::services::battery::Ba
     }
     drop(a);
     sync_presentation(app);
+    if let Some(activity) = activity {
+        use crate::services::battery::BatteryEventKind;
+        match activity.kind {
+            BatteryEventKind::Connected => battery_effect::start(app, true),
+            BatteryEventKind::Disconnected => battery_effect::start(app, false),
+            _ => {}
+        }
+    }
+    battery_effect::sync(app);
 }
 
 fn time_label(seconds: f64) -> String {

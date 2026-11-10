@@ -1,5 +1,7 @@
 # Still Island
 
+**Liquid Glass** is available in Settings → Appearance → Island material (`appearance=liquid-glass`). It preserves backdrop colors with a slight dark tint, adaptive foreground colors, and GPU-rendered blur and refractive edges. Capture is bounded to 30fps and stops while hidden; unavailable live capture falls back to snapshots without changing the saved material. The existing material selection remains unchanged. `--verify-liquid --appearance=liquid-glass` captures deterministic material states and checks dark and saturated backdrop colors. See [Liquid Glass verification](LIQUID-GPU-VERIFICATION.md) for measurements and remaining limitations.
+
 The launcher also searches Windows settings and tools (try `Bluetooth`, `uninstall programs`, or `Task Manager`). Type `(50 + 20) / 2` or `5 ft to cm` for local fend calculations, or `100 USD to SGD` for currency conversion. A selected answer copies with Enter and contracts the notch. Currency uses Frankfurter reference rates cached for six hours; only the currency pair is sent, never the amount. Settings → Behavior contains independent provider toggles. Expressions are not saved.
 
 
@@ -12,6 +14,10 @@ The launcher shares the persistent overlay and its interruptible spring geometry
 The latest polish adds native hover deadline checks, per-app fullscreen rules, finite media feedback, clearer lyric gaps, and a live settings preview with presets and independent text sizing. See [current verification and runtime limits](POLISH-VERIFICATION.md); [earlier spacing and hover results](SPACING-HOVER-VERIFICATION.md) remain historical.
 
 In **Settings → Appearance**, choose Balanced, Roomy, or Larger text, then apply the preset. Text size changes typography separately from overall zoom and the advanced width/height controls. The fitted preview can show contracted, expanded, and media contours; Preview motion runs locally without leaving settings. Material tint remains independent. Acrylic/glass preview is an approximation of transparency; actual desktop composition depends on Windows.
+
+Connecting the charger (including at 100%) briefly shows battery-colored particles and glow for two seconds. Unplugging plays a subdued 900ms exit sweep. Staying connected, hovering, and duplicate readings never extend these effects. Media progress uses a traveling wave while visible and playing; countdown digits roll on normal second changes. Motion settings apply, and hidden effects are cancelled. `--verify-illustrations` checks battery events, expiry, and cancellation through the runtime handler.
+
+With automatic fullscreen hiding enabled, the notch contracts out of sight over fullscreen or maximized applications on its selected monitor. Move the pointer to that monitor's top edge to reveal it without taking focus; move into the notch to interact, or move away to hide it again. New tracks, playback changes, notifications, volume feedback, battery alerts, timer completion, and integration alerts briefly reveal a compact preview for three seconds. Hover pauses the remaining preview time; an explicitly opened panel remains interactive until dismissed. Session lock always hides immediately. Existing integration enablement, privacy, and per-app rules still apply.
 
 In **Settings → Behavior**, enter executable names under the per-app fullscreen rules and press Enter or **Apply app rules**. Always hide also hides over a windowed instance of that app, even with automatic fullscreen hiding disabled. Always show overrides automatic fullscreen hiding for that app. Clear a name to restore automatic behavior. Hide takes precedence, and session-lock hiding always applies.
 
@@ -171,6 +177,8 @@ Primary-monitor support and native startup registration are implemented; additio
 The original source is MIT licensed. Dependencies retain their own licenses, including Slint's applicable GPL/commercial/royalty-free options.
 
 ## Automated Windows releases
+
+The application does not currently check GitHub for updates or install them automatically. Download a newer release manually and run its Setup installer to upgrade an existing installation, or replace the portable executable after exiting the app. GitHub Actions automates release publishing, not updates on users' computers.
 
 Repository: https://github.com/vbatecan/my-island (private).
 

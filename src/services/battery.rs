@@ -21,6 +21,14 @@ impl BatterySnapshot {
             charging: (present && flags != 255).then_some(flags & 8 != 0),
         }
     }
+    /// AC connection remains meaningful when a full battery stops charging.
+    pub fn power_connected(self) -> bool {
+        self.present
+            && match self.external_power {
+                Some(connected) => connected,
+                None => self.charging == Some(true),
+            }
+    }
     pub fn label(self) -> &'static str {
         if !self.present {
             "No system battery"
@@ -107,6 +115,27 @@ mod tests {
     use super::*;
     fn battery(p: u8) -> BatterySnapshot {
         BatterySnapshot::from_raw(0, 0, p)
+    }
+    #[test]
+    fn full_battery_connection_drives_effect_without_claiming_charging() {
+        let unplugged = BatterySnapshot::from_raw(0, 1, 100);
+        let plugged = BatterySnapshot::from_raw(1, 1, 100);
+        assert!(!unplugged.power_connected());
+        assert!(plugged.power_connected());
+        assert_eq!(plugged.charging, Some(false));
+        assert_eq!(plugged.label(), "Plugged in");
+        assert!(!BatterySnapshot::from_raw(1, 128, 100).power_connected());
+        let mut detector = BatteryDetector::default();
+        detector.update(unplugged);
+        assert_eq!(
+            detector.update(plugged).unwrap().kind,
+            BatteryEventKind::Connected
+        );
+        assert_eq!(detector.update(plugged), None);
+        assert_eq!(
+            detector.update(unplugged).unwrap().kind,
+            BatteryEventKind::Disconnected
+        );
     }
     #[test]
     fn baseline_and_duplicates_are_silent() {

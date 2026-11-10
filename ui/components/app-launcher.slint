@@ -9,6 +9,7 @@ export struct LauncherResult {
 // The host owns discovery, selection and ranking. This view never launches or
 // searches on its own; it renders six results, or an answer and four results.
 export component AppLauncher inherits Rectangle {
+    in property <bool> light-material: false;
     in property <[LauncherResult]> results;
     in property <bool> busy: false;
     in property <string> status-text;
@@ -53,7 +54,7 @@ export component AppLauncher inherits Rectangle {
         width: parent.width;
         height: 48 * root.layout-pixel;
         border-radius: 8 * root.layout-pixel;
-        background: #ffffff0d;
+        background: (root.light-material ? #0000000d : #ffffff0d);
         border-width: 1px;
         border-color: search.has-focus ? #ffffff25 : #ffffff10;
         Text {
@@ -64,7 +65,7 @@ export component AppLauncher inherits Rectangle {
             text: "\u{E721}";
             font-family: "Segoe Fluent Icons";
             font-size: 17 * root.font-pixel;
-            color: #b5b5bd;
+            color: (root.light-material ? #4b4b54 : #b5b5bd);
             vertical-alignment: center;
         }
         if root.query == "" : Text {
@@ -74,7 +75,7 @@ export component AppLauncher inherits Rectangle {
             height: parent.height;
             text: "Search apps, settings, or calculate";
             font-size: 16 * root.font-pixel;
-            color: #71717b;
+            color: (root.light-material ? #4b4b54 : #71717b);
             vertical-alignment: center;
             overflow: elide;
         }
@@ -86,7 +87,7 @@ export component AppLauncher inherits Rectangle {
             text <=> root.query;
             single-line: true;
             font-size: 16 * root.font-pixel;
-            color: #f5f5f7;
+            color: (root.light-material ? #202024 : #f5f5f7);
             selection-background-color: #454552;
             selection-foreground-color: white;
             vertical-alignment: center;
@@ -109,7 +110,7 @@ export component AppLauncher inherits Rectangle {
         width: parent.width;
         visible: !root.answer-editing || root.answer-visible;
         text: root.answer-visible ? "ANSWER" : root.busy ? "FINDING APPLICATIONS" : root.query == "" ? "RECENT & SUGGESTED" : "APPLICATIONS & ACTIONS";
-        color: #7c7c87;
+        color: (root.light-material ? #4b4b54 : #7c7c87);
         font-size: 9 * root.font-pixel;
         font-weight: 600;
         letter-spacing: 0.8 * root.font-pixel;
@@ -126,7 +127,7 @@ export component AppLauncher inherits Rectangle {
         border-radius: 8 * root.layout-pixel;
         border-width: 1px;
         border-color: root.selected-index == -1 ? #ffffff30 : #ffffff12;
-        background: root.selected-index == -1 ? #ffffff13 : #ffffff09;
+        background: root.selected-index == -1 ? (root.light-material ? #00000013 : #ffffff13) : (root.light-material ? #00000009 : #ffffff09);
         clip: true;
         Text {
             x: 14 * root.layout-pixel;
@@ -134,7 +135,7 @@ export component AppLauncher inherits Rectangle {
             width: parent.width - 28 * root.layout-pixel;
             height: 40 * root.layout-pixel;
             text: root.answer-busy ? "" : root.answer-error ? "Result unavailable" : root.answer-value;
-            color: root.answer-error ? #b5b5c0 : #f5f5f7;
+            color: root.answer-error ? (root.light-material ? #4b4b54 : #b5b5c0) : (root.light-material ? #202024 : #f5f5f7);
             font-size: (root.answer-busy || root.answer-error ? 15 : 25) * root.font-pixel;
             font-weight: 600;
             vertical-alignment: center;
@@ -146,7 +147,7 @@ export component AppLauncher inherits Rectangle {
             width: parent.width - 28 * root.layout-pixel;
             height: 29 * root.layout-pixel;
             text: root.answer-detail;
-            color: #9999a5;
+            color: (root.light-material ? #4b4b54 : #9999a5);
             font-size: 10 * root.font-pixel;
             vertical-alignment: center;
             overflow: elide;
@@ -165,7 +166,7 @@ export component AppLauncher inherits Rectangle {
         height: root.row-height - 2 * root.layout-pixel;
         visible: index < (root.answer-visible ? 4 : 6);
         border-radius: 6 * root.layout-pixel;
-        background: root.selected-index == index ? #ffffff16 : row-pointer.has-hover ? #ffffff0c : transparent;
+        background: root.selected-index == index ? (root.light-material ? #00000016 : #ffffff16) : row-pointer.has-hover ? (root.light-material ? #0000000c : #ffffff0c) : transparent;
         clip: true;
         accessible-role: button;
         accessible-label: item.title;
@@ -186,7 +187,7 @@ export component AppLauncher inherits Rectangle {
             text: item.detail == "Windows Settings" || item.detail == "Windows system tool" ? "\u{E713}" : "\u{ECAA}";
             font-family: "Segoe Fluent Icons";
             font-size: 23 * root.font-pixel;
-            color: #9999a5;
+            color: (root.light-material ? #4b4b54 : #9999a5);
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -196,7 +197,7 @@ export component AppLauncher inherits Rectangle {
             width: parent.width - self.x - 50 * root.layout-pixel;
             height: item.detail == "" ? parent.height : root.title-height;
             text: item.title;
-            color: #efeff3;
+            color: (root.light-material ? #202024 : #efeff3);
             font-size: 12 * root.font-pixel;
             font-weight: 500;
             vertical-alignment: center;
@@ -208,7 +209,7 @@ export component AppLauncher inherits Rectangle {
             width: parent.width - self.x - 50 * root.layout-pixel;
             height: root.detail-height;
             text: item.detail;
-            color: #84848e;
+            color: (root.light-material ? #4b4b54 : #84848e);
             font-size: 9 * root.font-pixel;
             vertical-alignment: center;
             overflow: elide;
@@ -219,7 +220,7 @@ export component AppLauncher inherits Rectangle {
             width: 36 * root.layout-pixel;
             height: parent.height;
             text: "Enter";
-            color: #9a9aa5;
+            color: (root.light-material ? #4b4b54 : #9a9aa5);
             font-size: 9 * root.font-pixel;
             horizontal-alignment: right;
             vertical-alignment: center;
@@ -236,7 +237,7 @@ export component AppLauncher inherits Rectangle {
         width: parent.width - 24 * root.layout-pixel;
         height: max(0px, parent.height - 156 * root.layout-pixel);
         text: root.status-text != "" ? root.status-text : root.busy ? "Preparing your applications…" : "No applications found";
-        color: #a1a1ad;
+        color: (root.light-material ? #4b4b54 : #a1a1ad);
         font-size: 12 * root.font-pixel;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -250,7 +251,7 @@ export component AppLauncher inherits Rectangle {
         width: parent.width;
         text: root.status-text;
         font-size: 9 * root.font-pixel;
-        color: #92929d;
+        color: (root.light-material ? #4b4b54 : #92929d);
         vertical-alignment: center;
         overflow: elide;
     }

@@ -6,6 +6,98 @@ use crate::{
 };
 use slint::{ModelRc, VecModel};
 use std::rc::Rc;
+/// Each Slint window has its own GL context and owns its own borrowed images.
+pub fn install_preview_renderer(ui: &SettingsWindow) {
+    use slint::ComponentHandle;
+    let weak = ui.as_weak();
+    let mut renderer: Option<crate::liquid::Renderer> = None;
+    let mut sample = crate::material::Backdrop {
+        width: 512,
+        height: 256,
+        pixels: Vec::with_capacity(512 * 256 * 4),
+    };
+    for y in 0..256 {
+        for x in 0..512 {
+            sample
+                .pixels
+                .extend_from_slice(if (x / 60 + y / 40) % 2 == 0 {
+                    &[215, 222, 235, 255]
+                } else {
+                    &[75, 117, 150, 255]
+                });
+        }
+    }
+    let result = ui.window().set_rendering_notifier(move |state, api| {
+        if matches!(state, slint::RenderingState::RenderingTeardown) {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_liquid_preview(slint::Image::default());
+            }
+            if let Some(gpu) = renderer.take() {
+                unsafe {
+                    gpu.destroy();
+                }
+            }
+            return;
+        }
+        let Some(ui) = weak.upgrade() else { return };
+        match state {
+            slint::RenderingState::RenderingSetup => {
+                if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
+                    // SAFETY: notifier owns this current GL context.
+                    renderer = unsafe {
+                        crate::liquid::Renderer::new(glow::Context::from_loader_function_cstr(
+                            get_proc_address,
+                        ))
+                    }
+                    .ok();
+                }
+            }
+            slint::RenderingState::BeforeRendering if ui.get_appearance_index() == 5 => {
+                let Some(gpu) = renderer.as_mut() else { return };
+                let form = if ui.get_form_factor_index() == 0 {
+                    crate::shape::FormFactor::Notch
+                } else {
+                    crate::shape::FormFactor::Island
+                };
+                let w = ui.get_preview_width();
+                let h = ui.get_preview_height();
+                let radius = if ui.get_preview_state() == 0 {
+                    ui.get_notch_contracted_radius()
+                } else {
+                    ui.get_notch_corner_radius()
+                };
+                let shoulder = if form == crate::shape::FormFactor::Notch {
+                    8f32.min(h / 2.)
+                } else {
+                    0.
+                };
+                let contour = crate::shape::ShapeContour::new(
+                    (w - 2. * shoulder) as f64,
+                    h as f64,
+                    radius as f64,
+                    form,
+                );
+                let geometry =
+                    crate::liquid::Geometry::new([w, h], contour, 1., ui.get_tint(), false);
+                if let Ok(Some(image)) = gpu.render(&sample, 1, geometry, contour, true) {
+                    ui.set_liquid_preview(image);
+                }
+            }
+            slint::RenderingState::RenderingTeardown => {
+                ui.set_liquid_preview(slint::Image::default());
+                if let Some(gpu) = renderer.take() {
+                    unsafe {
+                        gpu.destroy();
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    if let Err(error) = result {
+        eprintln!("Liquid preview renderer unavailable: {error:?}");
+    }
+}
 pub fn populate(
     ui: &SettingsWindow,
     s: &Settings,

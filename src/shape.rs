@@ -97,6 +97,24 @@ impl ShapeContour {
             ]
         }
     }
+    /// Exact primitives used by the optical shader, SVG and native hit region.
+    pub fn shader_edges(self) -> [f32; 64] {
+        let mut packed = [0.; 64];
+        for (edge, out) in self
+            .edges()
+            .into_iter()
+            .zip(packed.as_chunks_mut::<8>().0.iter_mut())
+        {
+            let values = match edge {
+                Edge::Line(a, b) => [a[0], a[1], b[0], b[1], 0., 0., 0., 0.],
+                Edge::Arc(c, r, a, b) => [c[0], c[1], r, 0., a, b, 0., 1.],
+            };
+            for (out, value) in out.iter_mut().zip(values) {
+                *out = value as f32;
+            }
+        }
+        packed
+    }
     pub fn contains(self, x: f64, y: f64) -> bool {
         let s = self.shoulder();
         let w = self.total_width();
