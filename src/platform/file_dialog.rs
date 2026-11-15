@@ -96,6 +96,56 @@ pub fn choose_plugin_package(owner: isize) -> Result<Option<PathBuf>, String> {
     }
 }
 
+pub fn choose_folder(owner: isize) -> Result<Option<PathBuf>, String> {
+    let _apartment = Apartment::initialize()?;
+    let owner = HWND(owner as *mut _);
+    // SAFETY: owner is only used as an opaque HWND; validate it before use. The
+    // Shell owns the dialog and pumps this STA while Show is active. All COM
+    // objects are released before the apartment guard. UI values return by value.
+    unsafe {
+        if !IsWindow(Some(owner)).as_bool() {
+            return Err("The integration window closed before the file picker opened.".into());
+        }
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("Could not create the file picker: {e}"))?;
+        dialog
+            .SetTitle(w!("Select a folder"))
+            .map_err(|e| e.to_string())?;
+        dialog
+            .SetOkButtonLabel(w!("Select"))
+            .map_err(|e| e.to_string())?;
+        let options = dialog.GetOptions().map_err(|e| e.to_string())?;
+        dialog
+            .SetOptions(
+                options
+                    | windows::Win32::UI::Shell::FOS_PICKFOLDERS
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_FILEMUSTEXIST
+                    | FOS_PATHMUSTEXIST
+                    | FOS_NOCHANGEDIR
+                    | FOS_DONTADDTORECENT,
+            )
+            .map_err(|e| e.to_string())?;
+        if let Err(error) = dialog.Show(Some(owner)) {
+            if cancelled(error.code()) {
+                return Ok(None);
+            }
+            return Err(format!("Could not open the file picker: {error}"));
+        }
+        let item = dialog.GetResult().map_err(|e| e.to_string())?;
+        let name = item
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .map_err(|e| e.to_string())?;
+        // Copy UTF-16 directly: Windows paths need not be valid Unicode strings.
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_wide(name.as_wide()))
+        };
+        CoTaskMemFree(Some(name.0.cast()));
+        Ok(Some(path))
+    }
+}
+
 fn cancelled(code: HRESULT) -> bool {
     code == HRESULT::from_win32(ERROR_CANCELLED.0)
 }

@@ -1,4 +1,5 @@
 pub mod battery;
+pub mod downloads;
 pub mod lyrics;
 pub mod media;
 pub mod volume;

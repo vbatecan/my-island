@@ -5,31 +5,36 @@
 //! handle is retained in the catalog or crosses a thread boundary.
 use std::{
     collections::HashSet,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     marker::PhantomData,
     mem::size_of,
     os::windows::ffi::{OsStrExt, OsStringExt},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
+    ptr::null_mut,
     rc::Rc,
 };
 use windows::{
     Win32::{
-        Foundation::SIZE,
+        Foundation::{CloseHandle, SIZE},
         Graphics::Gdi::{
             BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS,
             DeleteDC, DeleteObject, GetDIBits, GetObjectW, HBITMAP, HDC,
         },
-        System::Com::{
-            COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree,
-            CoUninitialize,
+        System::{
+            Com::{
+                COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree,
+                CoUninitialize, IBindCtx,
+            },
+            Threading::{CREATE_NEW_CONSOLE, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW},
         },
         UI::{
             Shell::{
-                BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_CommonStartMenu, FOLDERID_StartMenu,
-                IEnumShellItems, IShellItem, IShellItemImageFactory, KF_FLAG_DEFAULT,
-                SHCreateItemFromParsingName, SHGetKnownFolderItem, SHGetKnownFolderPath, SIGDN,
-                SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY, SIIGBF_SCALEUP,
-                ShellExecuteW,
+                BHID_EnumItems, Common::ITEMIDLIST, FOLDERID_AppsFolder, FOLDERID_CommonStartMenu,
+                FOLDERID_Profile, FOLDERID_StartMenu, FOLDERID_System, IEnumShellItems, IShellItem,
+                IShellItemImageFactory, KF_FLAG_DEFAULT, SHCreateItemFromParsingName,
+                SHGetKnownFolderItem, SHGetKnownFolderPath, SHOpenFolderAndSelectItems,
+                SHParseDisplayName, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
+                SIIGBF_ICONONLY, SIIGBF_SCALEUP, ShellExecuteW,
             },
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
@@ -46,6 +51,9 @@ pub enum LaunchTarget {
     /// A Shell AppsFolder child parsing name, not a command line.
     AppId(String),
     WindowsCommand(String),
+    Folder(PathBuf),
+    File(PathBuf),
+    Url(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,16 +298,59 @@ pub fn enumerate() -> Result<Catalog, String> {
 
 fn target_name(target: &LaunchTarget) -> OsString {
     match target {
-        LaunchTarget::Shortcut(path) => path.as_os_str().to_owned(),
+        LaunchTarget::Shortcut(path) | LaunchTarget::Folder(path) | LaunchTarget::File(path) => {
+            path.as_os_str().to_owned()
+        }
         LaunchTarget::AppId(id) => OsString::from(format!("shell:AppsFolder\\{id}")),
         LaunchTarget::WindowsCommand(_) => OsString::new(),
+        LaunchTarget::Url(url) => OsString::from(url),
     }
+}
+
+/// Check syntax without touching the filesystem, including disconnected drives.
+pub fn is_absolute_folder_path(path: &Path) -> bool {
+    fn valid_component(component: &OsStr) -> bool {
+        !component.to_string_lossy().chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\'
+                )
+        })
+    }
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return false;
+    };
+    let valid_prefix = match prefix.kind() {
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_) => true,
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => [server, share]
+            .into_iter()
+            .all(|name| !name.is_empty() && name != "." && name != ".." && valid_component(name)),
+        _ => false,
+    };
+    valid_prefix
+        && path.is_absolute()
+        && components.all(|component| match component {
+            Component::Normal(name) => valid_component(name),
+            _ => true,
+        })
 }
 
 /// Ask the Shell to open the exact catalog target. Shortcut arguments and working
 /// directories are resolved by Windows; no shell command string is constructed.
 /// Success means the Shell accepted launch, not that the app has finished opening.
 pub fn launch(target: &LaunchTarget) -> Result<(), String> {
+    match target {
+        LaunchTarget::Folder(path) if !path.is_dir() => {
+            return Err("Folder not found. Check that the path is available.".into());
+        }
+        LaunchTarget::File(path) if !path.is_file() => {
+            return Err("File not found. It may have been moved or deleted.".into());
+        }
+        _ => {}
+    }
     let _apartment = Apartment::new()?;
     let command = if let LaunchTarget::WindowsCommand(id) = target {
         Some(crate::windows_commands::resolve(id)?)
@@ -322,14 +373,14 @@ pub fn launch(target: &LaunchTarget) -> Result<(), String> {
         .filter(|entry| !entry.executable.is_empty() && !entry.argument.is_empty())
         .map(|entry| wide(std::ffi::OsStr::new(entry.argument)))
         .transpose()?;
-    let target = wide(&name)?;
+    let encoded = wide(&name)?;
     // SAFETY: the NUL-terminated strings outlive the synchronous Shell call.
-    // No parameters are supplied and no untrusted string is treated as a command.
+    // Only built-in Windows commands can supply parameters.
     let result = unsafe {
         ShellExecuteW(
             None,
             w!("open"),
-            PCWSTR(target.as_ptr()),
+            PCWSTR(encoded.as_ptr()),
             parameters
                 .as_ref()
                 .map(|value| PCWSTR(value.as_ptr()))
@@ -339,12 +390,103 @@ pub fn launch(target: &LaunchTarget) -> Result<(), String> {
         )
     };
     let status = result.0 as isize;
-    if status <= 32 {
-        Err(format!(
+    if status > 32 {
+        return Ok(());
+    }
+    match target {
+        LaunchTarget::Folder(_) => Err("Windows could not open this folder.".into()),
+        LaunchTarget::File(_) => Err("Windows could not open this file.".into()),
+        LaunchTarget::Url(_) => Err("Windows could not open this website in your browser.".into()),
+        _ => Err(format!(
             "Windows could not launch this application (Shell error {status})."
-        ))
-    } else {
-        Ok(())
+        )),
+    }
+}
+
+fn command_line(command: &str) -> Result<Vec<u16>, String> {
+    // /D disables AutoRun. /S strips only the outer pair when used with /K;
+    // the command prompt interprets the user-supplied inner quotes and operators.
+    const PREFIX: &str = "cmd.exe /D /S /K \"";
+    const MAX_CMD_LINE: usize = 8191;
+    if command.trim().is_empty() || command.contains(['\0', '\r', '\n']) {
+        return Err("Enter a single-line command.".into());
+    }
+    if command.encode_utf16().count() + PREFIX.len() + 1 > MAX_CMD_LINE {
+        return Err("This command is too long for Command Prompt.".into());
+    }
+    Ok(PREFIX
+        .encode_utf16()
+        .chain(command.encode_utf16())
+        .chain([u16::from(b'"'), 0])
+        .collect())
+}
+
+/// Start a new Command Prompt for an explicitly submitted command.
+/// Success means the console process started. Its output appears in that console.
+pub fn run_command(command: &str) -> Result<(), String> {
+    let mut command_line = command_line(command)?;
+    const START_FAILED: &str = "Couldn’t start Command Prompt. Try again.";
+    let _apartment = Apartment::new().map_err(|_| START_FAILED)?;
+    let system = known_folder(&FOLDERID_System).map_err(|_| START_FAILED)?;
+    let executable = wide(system.join("cmd.exe").as_os_str()).map_err(|_| START_FAILED)?;
+    let directory = known_folder(&FOLDERID_Profile)
+        .ok()
+        .filter(|path| {
+            // cmd.exe does not support UNC working directories.
+            matches!(path.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
+                && path.is_dir()
+        })
+        .unwrap_or(system);
+    let directory = wide(directory.as_os_str()).map_err(|_| START_FAILED)?;
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: All buffers are NUL-terminated and remain alive through the call.
+    // CreateProcessW may mutate the command-line buffer. The explicit executable
+    // path fixes the image; the new console supplies its own standard handles.
+    unsafe {
+        CreateProcessW(
+            PCWSTR(executable.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NEW_CONSOLE,
+            None,
+            PCWSTR(directory.as_ptr()),
+            &startup,
+            &mut process,
+        )
+        .map_err(|_| START_FAILED)?;
+        let _ = CloseHandle(process.hThread);
+        let _ = CloseHandle(process.hProcess);
+    }
+    Ok(())
+}
+
+/// Select the exact item in its parent folder in File Explorer.
+pub fn show_in_explorer(target: &LaunchTarget) -> Result<(), String> {
+    let path = match target {
+        LaunchTarget::Folder(path) if path.is_dir() => path,
+        LaunchTarget::File(path) | LaunchTarget::Shortcut(path) if path.is_file() => path,
+        _ => return Err("This item could not be found in File Explorer.".into()),
+    };
+    let _apartment = Apartment::new()?;
+    let path = wide(path.as_os_str())?;
+    let mut item: *mut ITEMIDLIST = null_mut();
+    // SAFETY: The path is NUL-terminated. On success the Shell gives us an
+    // owned item ID list, which stays valid through the selection call.
+    unsafe {
+        SHParseDisplayName(PCWSTR(path.as_ptr()), None::<&IBindCtx>, &mut item, 0, None)
+            .map_err(|_| "This item could not be found in File Explorer.")?;
+        if item.is_null() {
+            return Err("This item could not be found in File Explorer.".into());
+        }
+        let opened = SHOpenFolderAndSelectItems(item, None, 0);
+        CoTaskMemFree(Some(item.cast()));
+        opened.map_err(|_| "Windows could not show this item in File Explorer.".into())
     }
 }
 
@@ -371,8 +513,14 @@ impl Drop for MemoryDc {
 /// low-resolution image. Cache by stable application ID and physical_size in the
 /// controller. This function keeps no GDI resources alive after returning.
 pub fn load_icon(target: &LaunchTarget, physical_size: u32) -> Result<IconPixels, String> {
-    if matches!(target, LaunchTarget::WindowsCommand(_)) {
-        return Err("Use Windows command category icon".into());
+    if matches!(
+        target,
+        LaunchTarget::WindowsCommand(_)
+            | LaunchTarget::Folder(_)
+            | LaunchTarget::File(_)
+            | LaunchTarget::Url(_)
+    ) {
+        return Err("Use a launcher category icon".into());
     }
     let _apartment = Apartment::new()?;
     let size = physical_size.clamp(16, 256);
@@ -490,9 +638,30 @@ mod tests {
         let encoded = wide(&target_name(&target)).unwrap();
         assert_eq!(*encoded.last().unwrap(), 0);
         assert!(wide(std::ffi::OsStr::new("bad\0target")).is_err());
+        let file = PathBuf::from("C:\\工具\\Notes & budget 2026.txt");
+        let encoded = wide(&target_name(&LaunchTarget::File(file.clone()))).unwrap();
+        assert_eq!(
+            OsString::from_wide(&encoded[..encoded.len() - 1]),
+            file.as_os_str()
+        );
         assert_eq!(
             target_name(&LaunchTarget::AppId("Package!App".into())),
             "shell:AppsFolder\\Package!App"
         );
+    }
+
+    #[test]
+    fn command_line_preserves_quotes_and_operators() {
+        let command = r#""C:\工具 Files\tool.exe" "two words" | findstr "two" > result.txt"#;
+        let line = command_line(command).unwrap();
+        assert_eq!(line.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&line[..line.len() - 1]).unwrap(),
+            format!("cmd.exe /D /S /K \"{command}\"")
+        );
+        assert!(command_line(" \t").is_err());
+        assert!(command_line("echo x\0y").is_err());
+        assert!(command_line("first\nsecond").is_err());
+        assert!(command_line(&"x".repeat(8191)).is_err());
     }
 }

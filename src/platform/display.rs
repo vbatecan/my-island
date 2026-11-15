@@ -66,18 +66,42 @@ pub fn monitors() -> Vec<MonitorInfo> {
     entries().into_iter().map(|entry| entry.0).collect()
 }
 
+thread_local! {
+    static SELECTED: std::cell::RefCell<Option<(String, HMONITOR, MONITORINFO, f64)>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn invalidate() {
+    SELECTED.with(|c| *c.borrow_mut() = None);
+}
 pub(crate) fn selected(id: &str) -> Option<(HMONITOR, MONITORINFO)> {
+    if let Some(value) = SELECTED.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|v| v.0 == id)
+            .map(|v| (v.1, v.2))
+    }) {
+        return Some(value);
+    }
     let entries = entries();
-    entries
+    let selected = entries
         .iter()
         .find(|e| e.0.id == id)
         .or_else(|| entries.iter().find(|e| e.0.primary))
         .or_else(|| entries.first())
-        .map(|e| (e.1, e.2))
+        .map(|e| (e.1, e.2));
+    if let Some((monitor, info)) = selected {
+        let dpi = scale(monitor);
+        SELECTED.with(|c| *c.borrow_mut() = Some((id.into(), monitor, info, dpi)));
+    }
+    selected
 }
 
 /// Effective monitor scaling is shared by native positioning and logical sizing.
 pub(crate) fn scale(monitor: HMONITOR) -> f64 {
+    if let Some(dpi) =
+        SELECTED.with(|c| c.borrow().as_ref().filter(|v| v.1 == monitor).map(|v| v.3))
+    {
+        return dpi;
+    }
     let mut dpi_x = 96;
     let mut dpi_y = 96;
     // SAFETY: the monitor came from synchronous enumeration; outputs are live

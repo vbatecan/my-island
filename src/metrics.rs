@@ -11,8 +11,15 @@ pub struct RenderMetrics {
     durations: RefCell<Vec<f64>>,
     intervals: RefCell<Vec<f64>>,
     idle_frames: Cell<u64>,
+    work: RefCell<Vec<f64>>,
 }
 impl RenderMetrics {
+    pub fn work(&self, elapsed: std::time::Duration) {
+        let mut work = self.work.borrow_mut();
+        if work.len() < 8192 {
+            work.push(elapsed.as_secs_f64() * 1000.);
+        }
+    }
     pub fn active(&self, value: bool) {
         if self.active.replace(value) != value {
             self.previous.set(None);
@@ -47,6 +54,12 @@ impl RenderMetrics {
         }
     }
     pub fn summary(&self) -> String {
+        let mut work = self.work.borrow().clone();
+        work.sort_by(f64::total_cmp);
+        let work95 = work
+            .get(work.len().saturating_sub(1) * 95 / 100)
+            .copied()
+            .unwrap_or(0.);
         let durations = self.durations.borrow();
         let mut intervals = self.intervals.borrow().clone();
         intervals.sort_by(f64::total_cmp);
@@ -60,7 +73,7 @@ impl RenderMetrics {
             .copied()
             .unwrap_or(0.);
         format!(
-            "render_metrics animated_frames={} mean_draw_ms={mean:.3} p95_frame_interval_ms={p95:.3} other_frames={} (renderer callbacks before swap; not displayed FPS)",
+            "render_metrics animated_frames={} mean_draw_ms={mean:.3} p95_frame_interval_ms={p95:.3} p95_update_ms={work95:.3} other_frames={} (renderer callbacks before swap; not displayed FPS)",
             durations.len(),
             self.idle_frames.get()
         )

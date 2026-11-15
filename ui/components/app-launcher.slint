@@ -1,21 +1,96 @@
+import { QuietButton, TextButton } from "controls.slint";
+
 export struct LauncherResult {
     id: string,
     title: string,
     detail: string,
+    is-folder: bool,
     icon: image,
     has-icon: bool,
 }
 
-// The host owns discovery, selection and ranking. This view never launches or
-// searches on its own; it renders six results, or an answer and four results.
+component LauncherIconButton inherits QuietButton {
+    callback key-pressed(KeyEvent) -> EventResult;
+    active: keys.has-focus;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    keys := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                if !event.repeat { root.clicked(); }
+                return accept;
+            }
+            return root.key-pressed(event);
+        }
+    }
+}
+
+component ShortcutField inherits Rectangle {
+    in property <bool> light-material;
+    in property <bool> active;
+    in property <length> layout-pixel;
+    in property <length> font-pixel;
+    in property <string> label;
+    in-out property <string> value;
+    callback accepted();
+    callback key-pressed(KeyEvent) -> EventResult;
+    public function focus-input() { field.focus(); }
+
+    private property <length> label-height: max(20 * root.layout-pixel, 18 * root.font-pixel);
+    height: root.label-height + max(38 * root.layout-pixel, 24 * root.font-pixel);
+    Text {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: root.label-height;
+        text: root.label;
+        color: root.light-material ? #4b4b54 : #b5b5bd;
+        font-size: 12 * root.font-pixel;
+        overflow: elide;
+    }
+    Rectangle {
+        x: 0px;
+        y: root.label-height;
+        width: parent.width;
+        height: parent.height - self.y;
+        border-radius: 6 * root.layout-pixel;
+        background: root.light-material ? #0000000d : #ffffff0d;
+        border-width: 1px;
+        border-color: field.has-focus ? (root.light-material ? #00000048 : #ffffff48) : (root.light-material ? #00000012 : #ffffff12);
+        field := TextInput {
+            x: 10 * root.layout-pixel;
+            width: max(0px, parent.width - 20 * root.layout-pixel);
+            height: parent.height;
+            text <=> root.value;
+            enabled: root.active;
+            single-line: true;
+            font-size: 14 * root.font-pixel;
+            color: root.light-material ? #202024 : #f5f5f7;
+            selection-background-color: #454552;
+            selection-foreground-color: white;
+            vertical-alignment: center;
+            accessible-label: root.label;
+            accepted => { root.accepted(); }
+            key-pressed(event) => { return root.key-pressed(event); }
+        }
+    }
+}
+
+// The host owns discovery, selection, ranking, and action execution.
 export component AppLauncher inherits Rectangle {
     in property <bool> light-material: false;
     in property <[LauncherResult]> results;
     in property <bool> busy: false;
     in property <string> status-text;
+    in property <bool> command-mode: false;
+    in property <bool> file-mode: false;
+    in property <string> file-status;
     in property <int> selected-index: 0;
     in property <bool> answer-editing: false;
     in property <bool> answer-visible: false;
+    in property <bool> answer-action: false;
+    in property <bool> answer-slow: false;
     in property <string> answer-value;
     in property <string> answer-detail;
     in property <bool> answer-busy: false;
@@ -25,12 +100,49 @@ export component AppLauncher inherits Rectangle {
     in property <length> font-pixel: 1px;
     in property <length> layout-pixel: 1px;
     in-out property <string> query;
+    in property <[string]> action-items;
+    in property <string> action-title;
+    in property <string> action-status;
+    in property <int> action-selected: 0;
+    in property <bool> actions-open: false;
+    in property <bool> shortcut-open: false;
+    in property <bool> shortcut-editing: false;
+    in-out property <string> shortcut-alias;
+    in-out property <string> shortcut-target;
     callback query-edited(string);
     callback activate(int);
     callback navigate(int);
     callback dismiss();
-    public function focus-search() { search.focus(); }
-    private property <length> row-height: min(46 * root.layout-pixel, max(32 * root.layout-pixel, (root.height - (root.answer-visible ? 212 : 112) * root.layout-pixel) / (root.answer-visible ? 4 : 6)));
+    callback toggle-actions(int);
+    callback action-navigate(int);
+    callback action-activate(int);
+    callback save-shortcut(string, string);
+
+    public function focus-search() {
+        if root.shortcut-open { alias-field.focus-input(); }
+        else if root.actions-open { menu-keys.focus(); }
+        else { search.focus(); }
+    }
+    function handle-panel-key(event: KeyEvent) -> EventResult {
+        if event.text == Key.Escape {
+            if !event.repeat { root.dismiss(); }
+            return accept;
+        }
+        if event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift && (event.text == "k" || event.text == "K") {
+            if !event.repeat { root.toggle-actions(root.selected-index); }
+            return accept;
+        }
+        return reject;
+    }
+    function save() { root.save-shortcut(root.shortcut-alias, root.shortcut-target); }
+
+    private property <bool> normal-mode: !root.actions-open && !root.shortcut-open;
+    private property <bool> empty-results: root.results.length == 0 && !root.answer-visible && !root.answer-editing;
+    private property <float> scale: root.layout-pixel / 1px;
+    private property <length> header-height: 48 * root.layout-pixel;
+    private property <float> answer-top: root.answer-action ? 56 : 76;
+    private property <float> answer-height: root.answer-detail == "" ? 64 : 92;
+    private property <length> row-height: min(46 * root.layout-pixel, max(32 * root.layout-pixel, (root.height - (root.answer-visible ? root.answer-top + root.answer-height + 44 : 112) * root.layout-pixel) / (root.answer-visible ? 4 : 6)));
     private property <float> answer-reveal: root.answer-visible ? 1 : 0;
     animate answer-reveal { duration: root.animations-enabled ? 140ms / min(2, max(0.5, root.animation-speed)) : 0ms; easing: ease-out; }
     private property <length> title-height: max(18 * root.layout-pixel, 15 * root.font-pixel);
@@ -39,20 +151,21 @@ export component AppLauncher inherits Rectangle {
     background: transparent;
     clip: true;
     forward-focus: search;
-    changed visible => { if self.visible { search.focus(); } }
+    changed visible => { if self.visible { root.focus-search(); } }
 
     // Blank space belongs to the search panel too. Without this surface, a
     // click in a row gap bubbles to the island's click-to-collapse gesture.
     TouchArea {
         x: 0px; y: 0px; width: parent.width; height: parent.height;
-        clicked => { search.focus(); }
+        clicked => { if !root.shortcut-open { root.focus-search(); } }
     }
 
     search-box := Rectangle {
         x: 0px;
         y: 0px;
         width: parent.width;
-        height: 48 * root.layout-pixel;
+        height: root.header-height;
+        visible: root.normal-mode;
         border-radius: 8 * root.layout-pixel;
         background: (root.light-material ? #0000000d : #ffffff0d);
         border-width: 1px;
@@ -71,7 +184,7 @@ export component AppLauncher inherits Rectangle {
         if root.query == "" : Text {
             x: 46 * root.layout-pixel;
             y: 0px;
-            width: parent.width - self.x - 14 * root.layout-pixel;
+            width: max(0px, more-actions.x - self.x - 4 * root.layout-pixel);
             height: parent.height;
             text: "Search apps, settings, or calculate";
             font-size: 16 * root.font-pixel;
@@ -82,47 +195,210 @@ export component AppLauncher inherits Rectangle {
         search := TextInput {
             x: 46 * root.layout-pixel;
             y: 0px;
-            width: parent.width - self.x - 14 * root.layout-pixel;
+            width: max(0px, root.command-mode ? parent.width - self.x - 12 * root.layout-pixel : more-actions.x - self.x - 4 * root.layout-pixel);
             height: parent.height;
             text <=> root.query;
+            enabled: root.normal-mode;
             single-line: true;
             font-size: 16 * root.font-pixel;
             color: (root.light-material ? #202024 : #f5f5f7);
             selection-background-color: #454552;
             selection-foreground-color: white;
             vertical-alignment: center;
-            accessible-label: "Search applications, Windows actions, or calculate";
+            accessible-label: "Launcher search. Use @ for apps, settings, and shortcuts, > to run a command, or file to search indexed names.";
             edited => { root.query-edited(self.text); }
             accepted => { root.activate(root.selected-index); }
             key-pressed(event) => {
                 if event.text == Key.UpArrow { root.navigate(-1); return accept; }
                 if event.text == Key.DownArrow { root.navigate(1); return accept; }
-                if event.text == Key.Escape { root.dismiss(); return accept; }
-                return reject;
+                return root.handle-panel-key(event);
             }
+        }
+        more-actions := LauncherIconButton {
+            x: parent.width - self.width - 6 * root.layout-pixel;
+            y: (parent.height - self.height) / 2;
+            width: 36 * root.layout-pixel;
+            height: 36 * root.layout-pixel;
+            visible: !root.command-mode;
+            enabled: root.visible && root.normal-mode && !root.command-mode;
+            light-material: root.light-material;
+            ui-scale: root.scale;
+            glyph: "\u{e712}";
+            label: "Show launcher actions";
+            clicked => { root.toggle-actions(root.selected-index); }
+            key-pressed(event) => { return root.handle-panel-key(event); }
         }
     }
 
-    Text {
+    subview-header := Rectangle {
         x: 0px;
-        y: 59 * root.layout-pixel;
-        height: 15 * root.layout-pixel;
+        y: 0px;
         width: parent.width;
-        visible: !root.answer-editing || root.answer-visible;
-        text: root.answer-visible ? "ANSWER" : root.busy ? "FINDING APPLICATIONS" : root.query == "" ? "RECENT & SUGGESTED" : "APPLICATIONS & ACTIONS";
-        color: (root.light-material ? #4b4b54 : #7c7c87);
-        font-size: 9 * root.font-pixel;
-        font-weight: 600;
-        letter-spacing: 0.8 * root.font-pixel;
-        overflow: elide;
+        height: root.header-height;
+        visible: !root.normal-mode;
+        LauncherIconButton {
+            x: 0px;
+            y: (parent.height - self.height) / 2;
+            width: 36 * root.layout-pixel;
+            height: 36 * root.layout-pixel;
+            enabled: root.visible && !root.normal-mode;
+            light-material: root.light-material;
+            ui-scale: root.scale;
+            glyph: "\u{e72b}";
+            label: "Back";
+            clicked => { root.dismiss(); }
+            key-pressed(event) => { return root.handle-panel-key(event); }
+        }
+        Text {
+            x: 46 * root.layout-pixel;
+            width: max(0px, parent.width - self.x);
+            height: parent.height;
+            text: root.shortcut-open ? (root.shortcut-editing ? "Edit shortcut" : "New shortcut") : root.action-title;
+            color: root.light-material ? #202024 : #f5f5f7;
+            font-size: 16 * root.font-pixel;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
     }
 
-    answer-card := Rectangle {
+    menu := Rectangle {
         x: 0px;
-        y: (76 + 5 * (1 - root.answer-reveal)) * root.layout-pixel;
+        y: subview-header.height + 8 * root.layout-pixel;
         width: parent.width;
-        height: 92 * root.layout-pixel;
-        visible: root.answer-reveal > 0.001;
+        height: max(0px, parent.height - self.y);
+        visible: root.actions-open && !root.shortcut-open;
+        menu-keys := FocusScope {
+            enabled: menu.visible;
+            focus-on-click: false;
+            key-pressed(event) => {
+                if event.text == Key.UpArrow { root.action-navigate(-1); return accept; }
+                if event.text == Key.DownArrow { root.action-navigate(1); return accept; }
+                    if event.text == Key.Return {
+                        if !event.repeat { root.action-activate(root.action-selected); }
+                        return accept;
+                    }
+                return root.handle-panel-key(event);
+            }
+        }
+        for label[index] in root.action-items : Rectangle {
+            x: 0px;
+            y: index * (self.height + 2 * root.layout-pixel);
+            width: parent.width;
+            height: max(36 * root.layout-pixel, 22 * root.font-pixel);
+            border-radius: 6 * root.layout-pixel;
+            background: root.action-selected == index ? (root.light-material ? #00000016 : #ffffff16) : action-pointer.has-hover ? (root.light-material ? #0000000c : #ffffff0c) : transparent;
+            accessible-role: button;
+            accessible-label: label;
+            accessible-action-default => { if menu.visible { root.action-activate(index); } }
+            Text {
+                x: 12 * root.layout-pixel;
+                width: max(0px, parent.width - 24 * root.layout-pixel);
+                height: parent.height;
+                text: label;
+                color: root.light-material ? #202024 : #efeff3;
+                font-size: 13 * root.font-pixel;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            action-pointer := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.action-activate(index); }
+            }
+        }
+        if root.action-status != "" : Text {
+            y: max(0px, parent.height - 48 * root.layout-pixel);
+            width: parent.width;
+            height: parent.height - self.y;
+            text: root.action-status;
+            color: root.light-material ? #4b4b54 : #b5b5c0;
+            font-size: 12 * root.font-pixel;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+
+    editor := Rectangle {
+        x: 0px;
+        y: subview-header.height + 8 * root.layout-pixel;
+        width: parent.width;
+        height: max(0px, parent.height - self.y);
+        visible: root.shortcut-open;
+        alias-field := ShortcutField {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            label: "Shortcut name";
+            active: editor.visible;
+            light-material: root.light-material;
+            layout-pixel: root.layout-pixel;
+            font-pixel: root.font-pixel;
+            value <=> root.shortcut-alias;
+            key-pressed(event) => { return root.handle-panel-key(event); }
+            accepted => { if root.shortcut-target == "" { target-field.focus-input(); } else { root.save(); } }
+        }
+        target-field := ShortcutField {
+            x: 0px;
+            y: alias-field.height + 14 * root.layout-pixel;
+            width: parent.width;
+            label: "Folder path or URL";
+            active: editor.visible;
+            light-material: root.light-material;
+            layout-pixel: root.layout-pixel;
+            font-pixel: root.font-pixel;
+            value <=> root.shortcut-target;
+            key-pressed(event) => { return root.handle-panel-key(event); }
+            accepted => { root.save(); }
+        }
+        save-button := TextButton {
+            x: parent.width - self.width;
+            y: target-field.y + target-field.height + 12 * root.layout-pixel;
+            width: max(96 * root.layout-pixel, 76 * root.font-pixel);
+            height: max(34 * root.layout-pixel, 22 * root.font-pixel);
+            label: "Save shortcut";
+            light-material: root.light-material;
+            ui-scale: root.scale;
+            text-scale: root.font-pixel / root.layout-pixel;
+            border-width: save-keys.has-focus ? 1px : 0px;
+            border-color: root.light-material ? #00000048 : #ffffff48;
+            clicked => { root.save(); }
+            accessible-action-default => { if editor.visible { root.save(); } }
+            save-keys := FocusScope {
+                enabled: editor.visible;
+                focus-on-click: false;
+                key-pressed(event) => {
+                    if event.text == Key.Return || event.text == Key.Space { root.save(); return accept; }
+                    return root.handle-panel-key(event);
+                }
+            }
+        }
+        if root.action-status != "" : Text {
+            x: 0px;
+            y: save-button.y + save-button.height + 10 * root.layout-pixel;
+            width: parent.width;
+            height: max(0px, parent.height - self.y);
+            text: root.action-status;
+            color: root.light-material ? #4b4b54 : #b5b5c0;
+            font-size: 12 * root.font-pixel;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+
+    if root.normal-mode && root.answer-slow : Text {
+        y: 76 * root.layout-pixel; width: parent.width; height: 28 * root.layout-pixel;
+        text: "Looking up exchange rate…"; font-size: 15 * root.font-pixel;
+        color: root.light-material ? #4b4b54 : #b5b5c0;
+    }
+    answer-card := Rectangle {
+        accessible-role: button;
+        accessible-label: root.answer-action ? root.answer-value : "Copy " + root.answer-value;
+        accessible-action-default => { if root.normal-mode && root.answer-visible && !root.answer-busy && !root.answer-error { root.activate(-1); } }
+        x: 0px;
+        y: (root.answer-top + 5 * (1 - root.answer-reveal)) * root.layout-pixel;
+        width: parent.width;
+        height: root.answer-height * root.layout-pixel;
+        visible: root.normal-mode && !root.file-mode && root.answer-reveal > 0.001;
         opacity: root.answer-reveal;
         border-radius: 8 * root.layout-pixel;
         border-width: 1px;
@@ -136,7 +412,8 @@ export component AppLauncher inherits Rectangle {
             height: 40 * root.layout-pixel;
             text: root.answer-busy ? "" : root.answer-error ? "Result unavailable" : root.answer-value;
             color: root.answer-error ? (root.light-material ? #4b4b54 : #b5b5c0) : (root.light-material ? #202024 : #f5f5f7);
-            font-size: (root.answer-busy || root.answer-error ? 15 : 25) * root.font-pixel;
+            font-size: (root.answer-busy || root.answer-error || root.answer-action ? 15 : 25) * root.font-pixel;
+            wrap: word-wrap;
             font-weight: 600;
             vertical-alignment: center;
             overflow: elide;
@@ -161,16 +438,16 @@ export component AppLauncher inherits Rectangle {
 
     for item[index] in root.results : Rectangle {
         x: 0px;
-        y: (root.answer-visible ? 180 : 80) * root.layout-pixel + index * root.row-height;
+        y: (root.answer-visible ? root.answer-top + root.answer-height + 12 : 60) * root.layout-pixel + index * root.row-height;
         width: parent.width;
         height: root.row-height - 2 * root.layout-pixel;
-        visible: index < (root.answer-visible ? 4 : 6);
+        visible: root.normal-mode && index < (root.answer-visible ? 4 : 6);
         border-radius: 6 * root.layout-pixel;
         background: root.selected-index == index ? (root.light-material ? #00000016 : #ffffff16) : row-pointer.has-hover ? (root.light-material ? #0000000c : #ffffff0c) : transparent;
         clip: true;
         accessible-role: button;
-        accessible-label: item.title;
-        accessible-action-default => { root.activate(index); }
+        accessible-label: item.detail == "" ? item.title : item.title + ", " + item.detail;
+        accessible-action-default => { if root.normal-mode { root.activate(index); } }
         if item.has-icon : Image {
             x: 8 * root.layout-pixel;
             y: (parent.height - self.height) / 2;
@@ -184,7 +461,10 @@ export component AppLauncher inherits Rectangle {
             y: (parent.height - self.height) / 2;
             width: 32 * root.layout-pixel;
             height: self.width;
-            text: item.detail == "Windows Settings" || item.detail == "Windows system tool" ? "\u{E713}" : "\u{ECAA}";
+            text: item.is-folder ? "\u{e8b7}" :
+                root.file-mode ? "\u{e8a5}" :
+                item.detail == "Website" || item.detail == "Recently opened · Website" ? "\u{e71b}" :
+                item.detail == "Windows Settings" || item.detail == "Windows system tool" ? "\u{e713}" : "\u{ecaa}";
             font-family: "Segoe Fluent Icons";
             font-size: 23 * root.font-pixel;
             color: (root.light-material ? #4b4b54 : #9999a5);
@@ -194,7 +474,7 @@ export component AppLauncher inherits Rectangle {
         Text {
             x: 52 * root.layout-pixel;
             y: item.detail == "" ? 0px : max(0px, (parent.height - root.result-text-height) / 2);
-            width: parent.width - self.x - 50 * root.layout-pixel;
+            width: parent.width - self.x - (root.file-mode ? 10 : 50) * root.layout-pixel;
             height: item.detail == "" ? parent.height : root.title-height;
             text: item.title;
             color: (root.light-material ? #202024 : #efeff3);
@@ -206,7 +486,7 @@ export component AppLauncher inherits Rectangle {
         if item.detail != "" : Text {
             x: 52 * root.layout-pixel;
             y: max(0px, (parent.height - root.result-text-height) / 2) + root.title-height;
-            width: parent.width - self.x - 50 * root.layout-pixel;
+            width: parent.width - self.x - (root.file-mode ? 10 : 50) * root.layout-pixel;
             height: root.detail-height;
             text: item.detail;
             color: (root.light-material ? #4b4b54 : #84848e);
@@ -214,7 +494,7 @@ export component AppLauncher inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        if root.selected-index == index : Text {
+        if !root.file-mode && root.selected-index == index : Text {
             x: parent.width - 44 * root.layout-pixel;
             y: 0px;
             width: 36 * root.layout-pixel;
@@ -228,15 +508,21 @@ export component AppLauncher inherits Rectangle {
         row-pointer := TouchArea {
             mouse-cursor: pointer;
             clicked => { root.activate(index); }
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                    root.toggle-actions(index);
+                }
+            }
         }
     }
 
-    if root.results.length == 0 && !root.answer-visible && !root.answer-editing : Text {
+    if root.normal-mode && root.empty-results && (!root.file-mode || root.file-status != "") : Text {
         x: 12 * root.layout-pixel;
         y: 104 * root.layout-pixel;
         width: parent.width - 24 * root.layout-pixel;
         height: max(0px, parent.height - 156 * root.layout-pixel);
-        text: root.status-text != "" ? root.status-text : root.busy ? "Preparing your applications…" : "No applications found";
+        text: root.file-mode ? root.file-status :
+            root.status-text != "" ? root.status-text : root.busy ? "Preparing your applications…" : "No results";
         color: (root.light-material ? #4b4b54 : #a1a1ad);
         font-size: 12 * root.font-pixel;
         horizontal-alignment: center;
@@ -244,7 +530,7 @@ export component AppLauncher inherits Rectangle {
         wrap: word-wrap;
     }
 
-    if root.status-text != "" : Text {
+    if root.normal-mode && !root.file-mode && root.status-text != "" && !root.empty-results : Text {
         x: 0px;
         y: parent.height - 21 * root.layout-pixel;
         height: 17 * root.layout-pixel;

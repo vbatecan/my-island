@@ -37,6 +37,8 @@ pub struct Settings {
     pub compact_now_playing: bool,
     pub online_lyrics: bool,
     pub hover_expand: bool,
+    pub hide_on_hover: bool,
+    pub hover_only_maximized: bool,
     pub hover_delay: u32,
     pub collapse_delay: u32,
     pub scroll_volume: bool,
@@ -94,6 +96,8 @@ impl Default for Settings {
             compact_now_playing: true,
             online_lyrics: true,
             hover_expand: false,
+            hide_on_hover: false,
+            hover_only_maximized: false,
             hover_delay: 350,
             collapse_delay: 350,
             scroll_volume: true,
@@ -327,6 +331,8 @@ impl Settings {
                     "compact_now_playing" => s.compact_now_playing = v == "true",
                     "online_lyrics" => s.online_lyrics = v != "false",
                     "hover_expand" => s.hover_expand = v == "true",
+                    "hide_on_hover" => s.hide_on_hover = v == "true",
+                    "hover_only_maximized" => s.hover_only_maximized = v == "true",
                     "hover_delay" => {
                         if let Ok(v) = v.parse::<u32>() {
                             s.hover_delay = v
@@ -388,6 +394,10 @@ impl Settings {
             self.fullscreen_hide,
             self.monitor_id
         );
+        text.push_str(&format!(
+            "hide_on_hover={}\nhover_only_maximized={}\n",
+            self.hide_on_hover, self.hover_only_maximized
+        ));
         text.push_str(&format!(
             "launcher_enabled={}\nlauncher_shortcut={}\n",
             self.launcher_enabled, self.launcher_shortcut

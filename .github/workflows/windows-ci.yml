@@ -48,3 +48,5 @@ jobs:
         run: cargo test --workspace --locked
       - name: Release tooling tests
         run: ./scripts/test-release.ps1
+      - name: Update fixture tests
+        run: ./scripts/test-app-update.ps1

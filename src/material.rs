@@ -11,12 +11,17 @@ pub struct Backdrop {
     pub height: u32,
     pub pixels: Vec<u8>,
 }
+pub struct PreparedBackdrop {
+    blurred: Backdrop,
+    source_size: (u32, u32),
+}
+
 #[derive(Default)]
 pub struct Glass {
     pub backdrop: Option<Backdrop>,
     revision: u64,
     source_size: (u32, u32),
-    unfiltered: Option<Backdrop>,
+    sample_y: f32,
     pub liquid_backdrop: Option<Backdrop>,
     pub liquid_revision: u64,
     pub palette: crate::liquid::Palette,
@@ -30,6 +35,7 @@ struct GlassCacheKey {
     scale_bits: u32,
     capture_scale_bits: u32,
     canvas_width_bits: u32,
+    sample_y_bits: u32,
     backdrop_revision: u64,
     form: FormFactor,
     profile: OpticalProfile,
@@ -40,6 +46,12 @@ enum OpticalProfile {
     Glass,
 }
 impl Glass {
+    pub fn set_sample_offset(&mut self, y: f32) {
+        self.sample_y = y;
+    }
+    pub fn backdrop_revision(&self) -> u64 {
+        self.revision
+    }
     pub fn set_liquid_backdrop(&mut self, frame: Backdrop) -> bool {
         if frame.width == 0
             || frame.height == 0
@@ -51,43 +63,44 @@ impl Glass {
         self.liquid_revision = self.liquid_revision.wrapping_add(1);
         true
     }
-    pub fn set_backdrop(&mut self, frame: Backdrop) -> bool {
-        let Some(mut reduced) = reduced_backdrop(&frame) else {
-            return false;
-        };
+    /// Prepare captured pixels on the capture worker before publishing to Slint.
+    pub fn prepare_backdrop(frame: Backdrop) -> Option<PreparedBackdrop> {
         let source_size = (frame.width, frame.height);
-        // Compare before the two blur passes. Unchanged frames perform no blur,
-        // optical rasterization or image upload. Keep only bounded raw samples.
-        if self.source_size == source_size
-            && self.unfiltered.as_ref().is_some_and(|old| {
-                old.width == reduced.width
-                    && old.height == reduced.height
-                    && old.pixels == reduced.pixels
-            })
-        {
-            return false;
-        }
-        self.unfiltered = Some(reduced.clone());
-        let radius = (reduced.width / 140).clamp(1, 12) as usize;
-        blur(&mut reduced, radius);
-        blur(&mut reduced, radius);
+        let mut blurred = reduced_backdrop(frame)?;
+        let radius = (blurred.width / 140).clamp(1, 12) as usize;
+        blur(&mut blurred, radius);
+        blur(&mut blurred, radius);
+        Some(PreparedBackdrop {
+            blurred,
+            source_size,
+        })
+    }
+
+    pub fn set_prepared_backdrop(&mut self, prepared: PreparedBackdrop) -> bool {
+        let PreparedBackdrop {
+            blurred,
+            source_size,
+        } = prepared;
         if self.source_size == source_size
             && self.backdrop.as_ref().is_some_and(|old| {
-                old.width == reduced.width
-                    && old.height == reduced.height
-                    && old.pixels == reduced.pixels
+                old.width == blurred.width
+                    && old.height == blurred.height
+                    && old.pixels == blurred.pixels
             })
         {
             return false;
         }
         self.source_size = source_size;
-        self.backdrop = Some(reduced);
+        self.backdrop = Some(blurred);
         self.revision = self.revision.wrapping_add(1);
         true
     }
+    #[cfg(test)]
+    pub fn set_backdrop(&mut self, frame: Backdrop) -> bool {
+        Self::prepare_backdrop(frame).is_some_and(|frame| self.set_prepared_backdrop(frame))
+    }
     pub fn clear(&mut self) {
         self.backdrop = None;
-        self.unfiltered = None;
         self.liquid_backdrop = None;
         self.source_size = (0, 0);
         self.cache = None;
@@ -184,6 +197,7 @@ impl Glass {
             scale_bits: scale.to_bits(),
             capture_scale_bits: capture_scale.to_bits(),
             canvas_width_bits: canvas_width.to_bits(),
+            sample_y_bits: self.sample_y.to_bits(),
             backdrop_revision: self.revision,
             form,
             profile,
@@ -252,7 +266,7 @@ impl Glass {
                     // original capture, then into the reduced backdrop. DPI and
                     // user zoom must not shift the sampled desktop crop.
                     let source_x = (left + x as f32 + 0.5 + dx) / scale * capture_scale;
-                    let source_y = (y as f32 + 0.5 + dy) / scale * capture_scale;
+                    let source_y = ((y as f32 + 0.5 + dy) / scale + self.sample_y) * capture_scale;
                     let mut c = sample(
                         frame,
                         source_x * frame.width as f32 / self.source_size.0.max(1) as f32 - 0.5,
@@ -290,7 +304,7 @@ fn optical_scale(width: f64, height: f64, requested: f32) -> f32 {
     let limit = (MAX_OPTICAL_PIXELS / (width.max(1.) * height.max(1.))).sqrt() as f32;
     requested.min(1.25).min(limit).max(0.01)
 }
-fn reduced_backdrop(frame: &Backdrop) -> Option<Backdrop> {
+fn reduced_backdrop(frame: Backdrop) -> Option<Backdrop> {
     let size = (frame.width as usize)
         .checked_mul(frame.height as usize)?
         .checked_mul(4)?;
@@ -303,14 +317,14 @@ fn reduced_backdrop(frame: &Backdrop) -> Option<Backdrop> {
     let width = (frame.width as f32 * factor).floor().max(1.) as u32;
     let height = (frame.height as f32 * factor).floor().max(1.) as u32;
     if width == frame.width && height == frame.height {
-        return Some(frame.clone());
+        return Some(frame);
     }
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
             let sx = (x as f32 + 0.5) * frame.width as f32 / width as f32 - 0.5;
             let sy = (y as f32 + 0.5) * frame.height as f32 / height as f32 - 0.5;
-            let c = sample(frame, sx, sy);
+            let c = sample(&frame, sx, sy);
             let alpha = frame.pixels[((sy.round().clamp(0., (frame.height - 1) as f32) as u32
                 * frame.width
                 + sx.round().clamp(0., (frame.width - 1) as f32) as u32)

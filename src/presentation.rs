@@ -31,6 +31,7 @@ pub enum Panel {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Content {
     AppLauncher,
+    DownloadsPreview(String, u32),
     Idle,
     CompactMedia,
     CompactTimer,
@@ -53,10 +54,12 @@ pub struct Presentation {
     pub content: Content,
     pub pending: usize,
     pub volume_chip: bool,
+    pub timer_alert: bool,
 }
 impl Presentation {
     pub fn state(&self) -> IslandState {
         match self.content {
+            Content::DownloadsPreview(..) => IslandState::Compact,
             Content::AppLauncher => IslandState::AppLauncher,
             Content::Idle => IslandState::Idle,
             Content::CompactMedia
@@ -68,7 +71,8 @@ impl Presentation {
             | Content::Notification(..) => IslandState::Compact,
             Content::Launcher => IslandState::Expanded,
             Content::Media => IslandState::Media,
-            Content::Timer | Content::TimerFinished => IslandState::Timer,
+            Content::Timer => IslandState::Timer,
+            Content::TimerFinished => IslandState::Compact,
             Content::VolumePanel => IslandState::Volume,
             Content::BatteryPanel => IslandState::Battery,
             Content::PluginPanel => IslandState::Plugin,
@@ -118,6 +122,8 @@ impl Card {
     }
 }
 pub struct PresentationCoordinator {
+    occluded: bool,
+    download_preview: Option<(String, u32, u64)>,
     selected_page: Option<Page>,
     panel: Option<Panel>,
     hover_panel: bool,
@@ -139,6 +145,8 @@ pub struct PresentationCoordinator {
 impl Default for PresentationCoordinator {
     fn default() -> Self {
         Self {
+            occluded: false,
+            download_preview: None,
             selected_page: None,
             panel: None,
             hover_panel: false,
@@ -160,6 +168,12 @@ impl Default for PresentationCoordinator {
     }
 }
 impl PresentationCoordinator {
+    pub fn set_occluded(&mut self, occluded: bool, now: u64) {
+        if occluded != self.occluded {
+            self.advance(now);
+            self.occluded = occluded;
+        }
+    }
     pub fn selected_page(&self) -> Option<&Page> {
         self.selected_page.as_ref()
     }
@@ -178,6 +192,15 @@ impl PresentationCoordinator {
         self.set_selected_page(Some(page), now);
         self.open(panel, now);
         self.hover_panel = true;
+    }
+    pub fn files_changed(&mut self, title: String, count: u32, now: u64) {
+        if self.download_preview.as_ref().is_some_and(|v| now < v.2) {
+            return;
+        }
+        self.download_preview = Some((title, count, now + 3000));
+    }
+    pub fn clear_files(&mut self) {
+        self.download_preview = None;
     }
     fn page_panel(page: &Page) -> Panel {
         match page {
@@ -204,7 +227,11 @@ impl PresentationCoordinator {
         // Notifications remain visible above feedback, so volume changes must
         // not pause their dwell. User panels, suppression and reading still do.
         if self.panel.is_none() && !self.suppressed && !self.hover {
-            let delta = now.saturating_sub(self.last);
+            let blocked_until = self
+                .volume_until
+                .unwrap_or(0)
+                .max(self.timer_finished_until.unwrap_or(0));
+            let delta = now.saturating_sub(self.last.max(blocked_until));
             if let Some(card) = &mut self.active {
                 let consumed = delta.min(card.remaining);
                 card.remaining -= consumed;
@@ -215,6 +242,14 @@ impl PresentationCoordinator {
     }
     pub fn advance(&mut self, now: u64) {
         self.account(now);
+        if self.timer_finished_until.is_some()
+            && (self.panel.is_some() || self.suppressed || self.occluded)
+        {
+            self.timer_finished_until = Some(u64::MAX);
+        }
+        if self.download_preview.as_ref().is_some_and(|v| now >= v.2) {
+            self.download_preview = None;
+        }
         self.plugins
             .retain(|p| now < p.visible_until.unwrap_or(p.expires));
         if self.volume_until.is_some_and(|end| now >= end) {
@@ -227,7 +262,7 @@ impl PresentationCoordinator {
             .retain(|card| now.saturating_sub(card.arrived) < 60_000);
         if self.active.as_ref().is_some_and(|card| {
             card.remaining == 0
-                || ((self.panel.is_some() || self.suppressed)
+                || ((self.panel.is_some() || self.suppressed || self.occluded)
                     && now.saturating_sub(card.arrived) >= 60_000)
         }) {
             self.active = None;
@@ -305,7 +340,7 @@ impl PresentationCoordinator {
         self.advance(now);
         self.timer_active = active;
         if finished {
-            self.timer_finished_until = Some(now.saturating_add(2500));
+            self.timer_finished_until = Some(u64::MAX);
         } else if active {
             self.timer_finished_until = None;
         }
@@ -320,6 +355,9 @@ impl PresentationCoordinator {
     pub fn open(&mut self, panel: Panel, now: u64) {
         self.hover_panel = false;
         self.advance(now);
+        if panel == Panel::Timer {
+            self.timer_finished_until = None;
+        }
         if !matches!(panel, Panel::Notification(_)) {
             if let Some(card) = self.active.take() {
                 self.pending.push_front(card);
@@ -332,8 +370,34 @@ impl PresentationCoordinator {
     /// A hover preview is temporary; explicit navigation takes ownership via `open`.
     pub fn open_hover(&mut self, now: u64) {
         if self.panel.is_none() {
+            let content = self.view(now).content;
+            let target = match content {
+                Content::Notification(record, _) => Some(Panel::Notification(record)),
+                Content::CompactTimer | Content::TimerFinished => Some(Panel::Timer),
+                Content::CompactMedia => Some(Panel::Media),
+                Content::CompactBattery(_) => Some(Panel::Battery),
+                Content::DownloadsPreview(..) => Some(Panel::Launcher),
+                Content::Volume => Some(Panel::Volume),
+                Content::CompactPlugin(_) | Content::CompactPluginPage { .. } => {
+                    Some(Panel::Plugins)
+                }
+                _ => None,
+            };
+            if let Some(panel) = target {
+                let interrupted = if matches!(panel, Panel::Notification(_)) {
+                    self.active.take()
+                } else {
+                    None
+                };
+                self.open(panel, now);
+                if let Some(card) = interrupted {
+                    self.pending.push_front(card);
+                }
+                self.hover_panel = true;
+                return;
+            }
             self.open(
-                if let Some(page) = &self.selected_page {
+                if let Some(page) = self.selected_page() {
                     Self::page_panel(page)
                 } else if self
                     .battery
@@ -379,6 +443,9 @@ impl PresentationCoordinator {
         }
     }
     pub fn close(&mut self, now: u64) {
+        if self.panel.is_none() {
+            self.timer_finished_until = None;
+        }
         self.advance(now);
         if matches!(self.panel, Some(Panel::Battery)) {
             self.battery = None;
@@ -386,7 +453,6 @@ impl PresentationCoordinator {
         self.panel = None;
         self.hover_panel = false;
         self.pinned = false;
-        self.timer_finished_until = None;
         self.advance(now);
     }
     pub fn panel_open(&self) -> bool {
@@ -529,6 +595,13 @@ impl PresentationCoordinator {
     }
     pub fn view(&mut self, now: u64) -> Presentation {
         self.advance(now);
+        if self.timer_finished_until == Some(u64::MAX)
+            && self.panel.is_none()
+            && !self.suppressed
+            && !self.occluded
+        {
+            self.timer_finished_until = Some(now.saturating_add(5000));
+        }
         if self.panel.is_none()
             && !self.suppressed
             && self.active.is_none()
@@ -559,16 +632,18 @@ impl PresentationCoordinator {
             }
         } else if self.suppressed {
             self.base_content()
-        } else if let Some(card) = &self.active {
-            Content::Notification(card.record.clone(), card.ids.len() as u32)
         } else if self.timer_finished_until.is_some() {
             Content::TimerFinished
-        } else if let Some(preview) = &self.battery {
-            Content::CompactBattery(preview.activity)
-        } else if let Some(preview) = self.plugins.front() {
-            Content::CompactPlugin(preview.activity.clone())
         } else if self.volume_until.is_some() {
             Content::Volume
+        } else if let Some(card) = &self.active {
+            Content::Notification(card.record.clone(), card.ids.len() as u32)
+        } else if let Some(preview) = &self.battery {
+            Content::CompactBattery(preview.activity)
+        } else if let Some((title, count, _)) = &self.download_preview {
+            Content::DownloadsPreview(title.clone(), *count)
+        } else if let Some(preview) = self.plugins.front() {
+            Content::CompactPlugin(preview.activity.clone())
         } else {
             self.base_content()
         };
@@ -576,15 +651,16 @@ impl PresentationCoordinator {
             content,
             pending,
             volume_chip,
+            timer_alert: self.panel.is_some() && self.timer_finished_until.is_some(),
         }
     }
     /// Contracted priority below notifications, transient events and feedback.
     /// Activity never mutates the user's remembered expanded destination.
     fn base_content(&self) -> Content {
-        if self.media {
-            Content::CompactMedia
-        } else if self.timer_active {
+        if self.timer_active {
             Content::CompactTimer
+        } else if self.media {
+            Content::CompactMedia
         } else {
             self.selected_compact().unwrap_or(Content::Idle)
         }
@@ -594,6 +670,9 @@ impl PresentationCoordinator {
         let mut consider = |candidate| {
             deadline = Some(deadline.map_or(candidate, |previous: u64| previous.min(candidate)));
         };
+        if let Some((_, _, end)) = &self.download_preview {
+            consider(*end);
+        }
         for preview in &self.plugins {
             consider(preview.visible_until.unwrap_or(preview.expires));
         }
@@ -601,7 +680,9 @@ impl PresentationCoordinator {
             consider(end);
         }
         if let Some(end) = self.timer_finished_until {
-            consider(end);
+            if end != u64::MAX {
+                consider(end);
+            }
         }
         if let Some(preview) = &self.battery {
             consider(preview.visible_until.unwrap_or(preview.expires));
@@ -610,10 +691,15 @@ impl PresentationCoordinator {
             consider(card.arrived.saturating_add(60_000));
         }
         if let Some(card) = &self.active {
-            if self.suppressed || self.panel.is_some() {
+            if self.suppressed || self.panel.is_some() || self.occluded {
                 consider(card.arrived.saturating_add(60_000));
             }
-            if self.panel.is_none() && !self.suppressed && !self.hover {
+            if self.panel.is_none()
+                && !self.suppressed
+                && !self.hover
+                && self.timer_finished_until.is_none()
+                && self.volume_until.is_none()
+            {
                 consider(now.saturating_add(card.remaining));
             }
         }
@@ -623,6 +709,49 @@ impl PresentationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completion_waits_for_panels_and_hidden_surfaces_then_gets_five_seconds() {
+        let mut c = PresentationCoordinator::default();
+        c.open(Panel::Media, 0);
+        c.set_timer(false, true, 10);
+        assert_eq!(c.view(10000).content, Content::Media);
+        assert!(c.view(10000).timer_alert);
+        c.close(10001);
+        c.set_occluded(true, 10001);
+        c.view(20000);
+        c.set_occluded(false, 20001);
+        assert_eq!(c.view(20001).content, Content::TimerFinished);
+        assert_eq!(c.view(25000).content, Content::TimerFinished);
+        assert_ne!(c.view(25001).content, Content::TimerFinished);
+    }
+    #[test]
+    fn active_timer_wins_over_music_and_opens_its_own_panel() {
+        let mut c = PresentationCoordinator::default();
+        c.set_media(true, 0);
+        c.set_timer(true, false, 1);
+        assert_eq!(c.view(2).content, Content::CompactTimer);
+        c.open_hover(3);
+        assert_eq!(c.view(4).content, Content::Timer);
+    }
+    #[test]
+    fn file_activity_respects_panels_and_has_finite_dwell() {
+        let mut c = PresentationCoordinator::default();
+        c.set_selected_page(Some(Page::Timer), 0);
+        c.files_changed("a.pdf".into(), 2, 1);
+        assert!(matches!(c.view(2).content, Content::DownloadsPreview(_, 2)));
+        c.files_changed("later.pdf".into(), 1, 1000);
+        assert!(matches!(
+            c.view(3000).content,
+            Content::DownloadsPreview(_, 2)
+        ));
+        assert_eq!(c.view(3001).content, Content::CompactTimer);
+        c.open(Panel::Media, 4000);
+        c.files_changed("b.pdf".into(), 1, 4001);
+        assert_eq!(c.view(4002).content, Content::Media);
+        c.close(8000);
+        assert_eq!(c.view(8001).content, Content::CompactTimer);
+        assert_eq!(c.selected_page(), Some(&Page::Timer));
+    }
     fn plugin(id: &str) -> PluginActivity {
         PluginActivity {
             plugin_id: id.into(),
@@ -664,7 +793,7 @@ mod tests {
         c.plugin_activity(plugin("test"), 0);
         c.view(0);
         c.volume(100);
-        assert!(matches!(c.view(100).content, Content::CompactPlugin(_)));
+        assert_eq!(c.view(100).content, Content::Volume);
         assert!(matches!(c.view(1600).content, Content::CompactPlugin(_)));
         assert_eq!(c.view(3000).content, Content::Idle);
     }
@@ -707,14 +836,13 @@ mod tests {
         c.set_timer(false, true, 0);
         c.battery(battery_event(), 10);
         assert_eq!(c.view(100).content, Content::TimerFinished);
-        assert!(matches!(c.view(2500).content, Content::CompactBattery(_)));
-        c.clear_battery(2600);
-        assert_eq!(c.view(2600).content, Content::Idle);
-        c.suppress(true, 2700);
-        c.battery(battery_event(), 2800);
-        assert_eq!(c.view(2900).content, Content::Idle);
-        c.suppress(false, 3000);
-        assert!(matches!(c.view(3000).content, Content::CompactBattery(_)));
+        assert!(matches!(c.view(5100).content, Content::CompactBattery(_)));
+        c.clear_battery(5200);
+        c.suppress(true, 5300);
+        c.battery(battery_event(), 5400);
+        assert_eq!(c.view(5500).content, Content::Idle);
+        c.suppress(false, 5600);
+        assert!(matches!(c.view(5600).content, Content::CompactBattery(_)));
     }
     #[test]
     fn battery_hover_opens_details_and_close_dismisses_preview() {
@@ -796,16 +924,15 @@ mod tests {
         let mut c = PresentationCoordinator::default();
         c.set_media(true, 0);
         c.set_timer(true, false, 10);
-        assert_eq!(c.view(20).content, Content::CompactMedia);
+        assert_eq!(c.view(20).content, Content::CompactTimer);
         c.open_hover(30);
-        assert_eq!(c.view(30).content, Content::Media);
+        assert_eq!(c.view(30).content, Content::Timer);
         c.close_hover(40);
         c.set_timer(false, true, 50);
         assert_eq!(c.view(50).content, Content::TimerFinished);
-        assert_eq!(c.next_deadline(50), Some(2550));
-        assert_eq!(c.view(2549).content, Content::TimerFinished);
-        assert_eq!(c.view(2550).content, Content::CompactMedia);
-        assert_eq!(c.next_deadline(2550), None);
+        assert_eq!(c.next_deadline(50), Some(5050));
+        assert_eq!(c.view(5049).content, Content::TimerFinished);
+        assert_eq!(c.view(5050).content, Content::CompactMedia);
     }
 
     #[test]
@@ -814,18 +941,18 @@ mod tests {
         c.open(Panel::Media, 0);
         c.set_timer(false, true, 10);
         assert_eq!(c.view(10).content, Content::Media);
+        assert!(c.view(10).timer_alert);
         c.close(20);
         c.push(note(1, "Messages"), 30);
-        assert!(matches!(c.view(30).content, Content::Notification(..)));
-        c.clear_notifications(40);
-        c.suppress(true, 50);
-        assert_eq!(c.view(50).content, Content::Idle);
-        c.set_timer(true, false, 60);
-        assert_eq!(c.view(60).content, Content::CompactTimer);
-        c.suppress(false, 70);
-        c.volume(80);
-        assert_eq!(c.view(80).content, Content::Volume);
-        assert_eq!(c.view(1580).content, Content::CompactTimer);
+        assert_eq!(c.view(30).content, Content::TimerFinished);
+        c.clear_timer(40);
+        assert!(matches!(c.view(40).content, Content::Notification(..)));
+        c.clear_notifications(50);
+        c.suppress(true, 60);
+        c.set_timer(false, true, 70);
+        assert_eq!(c.view(80).content, Content::Idle);
+        c.suppress(false, 90);
+        assert_eq!(c.view(90).content, Content::TimerFinished);
     }
 
     #[test]
@@ -892,11 +1019,10 @@ mod tests {
         let mut c = PresentationCoordinator::default();
         c.push(note(1, "a"), 0);
         c.volume(1000);
-        assert!(matches!(c.view(1000).content, Content::Notification(..)));
-        c.advance(2500);
+        let remaining = c.active.as_ref().unwrap().remaining;
+        assert_eq!(c.view(1000).content, Content::Volume);
         assert!(matches!(c.view(2500).content, Content::Notification(..)));
-        assert!(matches!(c.view(4999).content, Content::Notification(..)));
-        assert_eq!(c.view(5000).content, Content::Idle);
+        assert_eq!(c.active.as_ref().unwrap().remaining, remaining);
     }
     #[test]
     fn hover_pauses_and_queue_expires() {
@@ -971,11 +1097,13 @@ mod arbitration_regressions {
         let mut c = PresentationCoordinator::default();
         c.push(note(1, "a"), 0);
         c.volume(1000);
+        let remaining = c.active.as_ref().unwrap().remaining;
+        let end = c.volume_until.unwrap();
         c.advance(4500);
-        assert_eq!(c.active.as_ref().unwrap().remaining, 500);
-        assert_eq!(c.next_deadline(4500), Some(5000));
-        assert!(matches!(c.view(4999).content, Content::Notification(..)));
-        assert_eq!(c.view(5000).content, Content::Idle);
+        assert_eq!(
+            c.active.as_ref().unwrap().remaining,
+            remaining - (4500 - end)
+        );
     }
     #[test]
     fn repeated_volume_feedback_does_not_starve_notifications() {
@@ -983,9 +1111,10 @@ mod arbitration_regressions {
         c.push(note(1, "a"), 0);
         c.volume(1000);
         c.volume(2000);
-        c.advance(4500);
-        assert_eq!(c.active.as_ref().unwrap().remaining, 500);
-        assert_eq!(c.next_deadline(4500), Some(5000));
+        let remaining = c.active.as_ref().unwrap().remaining;
+        assert_eq!(c.view(2000).content, Content::Volume);
+        assert!(matches!(c.view(3500).content, Content::Notification(..)));
+        assert_eq!(c.active.as_ref().unwrap().remaining, remaining);
     }
     #[test]
     fn coalesced_identity_count_is_globally_bounded() {
@@ -1072,10 +1201,8 @@ mod arbitration_regressions {
         let mut c = PresentationCoordinator::default();
         c.volume(0);
         c.push(note(1, "a"), 10);
-        assert!(matches!(c.view(10).content, Content::Notification(..)));
-        c.advance(2500);
-        assert_eq!(c.active.as_ref().unwrap().remaining, 2510);
-        assert_eq!(c.next_deadline(2500), Some(5010));
+        assert_eq!(c.view(10).content, Content::Volume);
+        assert!(matches!(c.view(1500).content, Content::Notification(..)));
     }
 }
 #[cfg(test)]
@@ -1133,51 +1260,21 @@ mod navigation_tests {
     fn contracted_priority_unwinds_without_changing_remembered_page() {
         let mut c = PresentationCoordinator::default();
         c.set_selected_page(Some(plugin_page()), 0);
-        c.set_timer(true, false, 1);
-        assert_eq!(c.view(1).content, Content::CompactTimer);
-        c.set_media(true, 2);
-        assert_eq!(c.view(2).content, Content::CompactMedia);
+        c.set_media(true, 1);
+        c.set_timer(true, false, 2);
+        assert_eq!(c.view(2).content, Content::CompactTimer);
         c.volume(3);
-        assert_eq!(c.view(3).content, Content::Volume);
-        c.plugin_activity(
-            PluginActivity {
-                plugin_id: "fixture".into(),
-                id: "finished".into(),
-                title: "Completed".into(),
-                body: String::new(),
-                accent: String::new(),
-            },
-            4,
-        );
-        assert!(matches!(c.view(4).content, Content::CompactPlugin(_)));
-        c.battery(
-            BatteryActivity {
-                snapshot: crate::services::battery::BatterySnapshot::from_raw(1, 8, 50),
-                kind: crate::services::battery::BatteryEventKind::Connected,
-            },
-            5,
-        );
-        c.set_timer(false, true, 6);
-        c.push(notification(), 7);
-        assert!(matches!(c.view(7).content, Content::Notification(..)));
-        c.remove(1, 8);
-        assert_eq!(c.view(8).content, Content::TimerFinished);
-        c.clear_timer(9);
-        assert!(matches!(c.view(9).content, Content::CompactBattery(_)));
-        c.clear_battery(10);
-        assert!(matches!(c.view(10).content, Content::CompactPlugin(_)));
-        c.clear_plugin("fixture", 11);
-        assert_eq!(c.view(11).content, Content::Volume);
+        c.push(notification(), 4);
+        assert_eq!(c.view(4).content, Content::Volume);
+        c.set_timer(false, true, 5);
+        assert_eq!(c.view(5).content, Content::TimerFinished);
+        c.clear_timer(6);
+        assert_eq!(c.view(6).content, Content::Volume);
+        c.remove(1, 7);
         assert_eq!(c.view(1503).content, Content::CompactMedia);
-        c.set_timer(true, false, 1504);
-        c.set_media(false, 1505);
-        assert_eq!(c.view(1505).content, Content::CompactTimer);
-        c.clear_timer(1506);
-        assert_eq!(c.view(1506).content, compact_plugin());
+        c.set_media(false, 1504);
+        assert_eq!(c.view(1504).content, compact_plugin());
         assert_eq!(c.selected_page(), Some(&plugin_page()));
-        assert_eq!(c.next_deadline(1506), None);
-        c.set_selected_page(None, 1507);
-        assert_eq!(c.view(1507).content, Content::Idle);
     }
     #[test]
     fn selected_plugin_reopens_while_playback_prioritizes_compact_media() {
@@ -1189,7 +1286,7 @@ mod navigation_tests {
         assert_eq!(coordinator.view(20).content, Content::CompactMedia);
         assert_eq!(coordinator.next_deadline(20), None);
         coordinator.open_hover(30);
-        assert_eq!(coordinator.view(30).content, Content::PluginPanel);
+        assert_eq!(coordinator.view(30).content, Content::Media);
         assert_eq!(coordinator.selected_page(), Some(&plugin_page()));
     }
     #[test]

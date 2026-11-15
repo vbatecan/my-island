@@ -1,5 +1,5 @@
 param(
-    [switch]$Fixture,[string]$ControlDirectory,[switch]$SkipHover,[switch]$TraceHover,
+    [switch]$Fixture,[string]$ControlDirectory,[switch]$SkipHover,[switch]$TraceHover,[switch]$ScopedHover,
     [ValidateSet('Auto','Hide','Show')][string]$FullscreenOverride='Auto',
     [string]$MonitorId='', [switch]$AllMonitors,
     [ValidateSet('debug','release')][string]$Configuration='release'
@@ -86,7 +86,7 @@ public static class IslandFullscreenFixture {
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $executable=Join-Path $workspace "target\$Configuration\still-island.exe"
 if(-not (Test-Path -LiteralPath $executable)){throw 'Build the release executable first.'}
-if(Get-Process still-island -ErrorAction SilentlyContinue){throw 'Exit the existing island before this test; other instances are never stopped.'}
+if(-not $ScopedHover -and (Get-Process still-island -ErrorAction SilentlyContinue)){throw 'Exit the existing island before this test; other instances are never stopped.'}
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -239,6 +239,10 @@ if($selectedMonitor.Count -ne 1){
 $selectedMonitor=$selectedMonitor[0]
 $selectedMonitor.SelectedForTest=$true
 Add-Content -LiteralPath (Join-Path $settings 'settings.ini') -Value ('monitor_id='+$selectedMonitor.Device)
+if($ScopedHover){
+    $SkipHover=$true
+    Add-Content -LiteralPath (Join-Path $settings 'settings.ini') -Value "hide_on_hover=true`nhover_only_maximized=true"
+}
 $monitorSuffix=if($MonitorId){'-'+($selectedMonitor.Device -replace '[^A-Za-z0-9_-]','')}else{''}
 $savedPointer=New-Object IslandFullscreenProbe+Point
 $null=[IslandFullscreenProbe]::GetCursorPos([ref]$savedPointer)
@@ -274,6 +278,7 @@ try {
     $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
     $start.WorkingDirectory=$workspace
     $start.Arguments='--appearance=solid'
+    if($ScopedHover){$start.Arguments+=' --verify-surface --isolated-material-probe'}
     if($TraceHover){$start.Arguments+=' --trace-hover'}
     $start.EnvironmentVariables['LOCALAPPDATA']=$root
     $application=[Diagnostics.Process]::Start($start)
@@ -385,11 +390,19 @@ try {
         $null=[IslandFullscreenProbe]::SetCursorPos($hoverX,$outsideY)
         Wait-StableFixturePointer $hoverX $outsideY 1400
     }
-    $stages=@(@{Name='normal';Visible=$true},@{Name='maximized';Visible=$false},@{Name='fullscreen';Visible=$false},@{Name='restore';Visible=$true})
+    $stages=@(@{Name='normal';Visible=$true},@{Name='maximized';Visible=[bool]$ScopedHover},@{Name='fullscreen';Visible=$false},@{Name='restore';Visible=$true})
     foreach($stage in $stages){
         if($FullscreenOverride -eq 'Hide'){$stage.Visible=$false}
         elseif($FullscreenOverride -eq 'Show'){$stage.Visible=$true}
         $fixtureWindow=Send-FixtureCommand $stage.Name
+        if($ScopedHover -and [IslandFullscreenProbe]::GetForegroundWindow() -ne $fixtureWindow){
+            # Target the owned window through UI Automation. This sends no
+            # keyboard or mouse input to the desktop or another application.
+            Add-Type -AssemblyName UIAutomationClient
+            Add-Type -AssemblyName UIAutomationTypes
+            try { [System.Windows.Automation.AutomationElement]::FromHandle($fixtureWindow).SetFocus() } catch { }
+            Start-Sleep -Milliseconds 200
+        }
         if([IslandFullscreenProbe]::GetForegroundWindow() -ne $fixtureWindow){
             if($SkipHover){throw 'INCONCLUSIVE: owned fixture did not obtain foreground; no input was injected.'}
             if(-not [IslandFullscreenProbe]::ClickOwnedFixture($fixtureWindow,$fixtureProcess.Id)){

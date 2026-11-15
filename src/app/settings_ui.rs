@@ -6,46 +6,47 @@ pub(super) fn access_label(access: &AccessStatus) -> String {
 }
 
 pub(super) fn settings_status(app: &Rc<RefCell<App>>, message: &str) {
-    if let Some(ui) = app.borrow().preferences.upgrade() {
+    let mut a = app.borrow_mut();
+    if let Some(ui) = a.preferences() {
         ui.set_status_text(message.into());
+    } else {
+        a.settings_status = Some(message.into());
     }
 }
 
 pub(super) fn refresh_preferences(app: &Rc<RefCell<App>>) {
     let (ui, s, apps, access) = {
         let mut a = app.borrow_mut();
+        let Some(ui) = a.preferences() else {
+            return;
+        };
         if a.settings_sync {
             return;
         }
         a.settings_sync = true;
         (
-            a.preferences.upgrade(),
+            ui,
             a.settings.clone(),
             a.observed_apps.clone(),
             a.notification_access.clone(),
         )
     };
-    if let Some(ui) = ui {
-        crate::preferences::populate(
-            &ui,
-            &s,
-            &platform::monitors(),
-            &apps,
-            &access_label(&access),
-        );
-        ui.set_notification_access_requestable(!matches!(
-            access,
-            AccessStatus::UnavailablePortable
-        ));
-        let a = app.borrow();
-        ui.set_startup_available(a.startup.available && !a.startup_busy);
-        ui.set_startup_status(if a.startup_busy {
-            "Checking Windows startup…".into()
-        } else {
-            a.startup.message.as_str().into()
-        });
-    }
-    app.borrow_mut().settings_sync = false;
+    crate::preferences::populate(
+        &ui,
+        &s,
+        &platform::monitors(),
+        &apps,
+        &access_label(&access),
+    );
+    ui.set_notification_access_requestable(!matches!(access, AccessStatus::UnavailablePortable));
+    let mut a = app.borrow_mut();
+    ui.set_startup_available(a.startup.available && !a.startup_busy);
+    ui.set_startup_status(if a.startup_busy {
+        "Checking Windows startup…".into()
+    } else {
+        a.startup.message.as_str().into()
+    });
+    a.settings_sync = false;
 }
 
 pub(super) fn apply_settings(app: &Rc<RefCell<App>>, mut settings: Settings, persist: bool) {
@@ -53,6 +54,16 @@ pub(super) fn apply_settings(app: &Rc<RefCell<App>>, mut settings: Settings, per
     let (old, attached, service) = {
         let mut a = app.borrow_mut();
         let old = a.settings.clone();
+        if old.hide_on_hover != settings.hide_on_hover
+            || old.hover_only_maximized != settings.hover_only_maximized
+            || old.monitor_id != settings.monitor_id
+            || old.island_scale != settings.island_scale
+            || old.form_factor != settings.form_factor
+            || old.sizes() != settings.sizes()
+            || old.offset != settings.offset
+        {
+            a.visibility.reset_hover();
+        }
         a.settings = settings.clone();
         a.sync_canvas(false);
         if old.island_scale != settings.island_scale || old.sizes() != settings.sizes() {
@@ -153,8 +164,11 @@ pub(super) fn apply_settings(app: &Rc<RefCell<App>>, mut settings: Settings, per
             apply_content_properties(&ui, view, &a.settings);
         }
     }
-    if persist && let Err(e) = app.borrow().settings.save() {
-        settings_status(app, &format!("Preferences could not be saved: {e}"));
+    if persist {
+        let saved = app.borrow().settings.save();
+        if let Err(e) = saved {
+            settings_status(app, &format!("Preferences could not be saved: {e}"));
+        }
     }
     if old.launch_at_startup != settings.launch_at_startup {
         startup::request(app, settings.launch_at_startup);
@@ -172,43 +186,78 @@ pub(super) fn apply_settings(app: &Rc<RefCell<App>>, mut settings: Settings, per
 }
 
 pub(super) fn show_preferences(app: &Rc<RefCell<App>>) {
+    let Some(ui) = ensure_preferences(app) else {
+        return;
+    };
     if app.borrow().launcher.open {
         launcher::dismiss(app, false);
     }
     startup::refresh(app);
     refresh_preferences(app);
-    let ui = app.borrow().preferences.upgrade();
-    if let Some(ui) = ui {
-        {
-            let mut a = app.borrow_mut();
-            a.settings_visible = true;
-            let now = a.now();
-            a.coordinator.suppress(true, now);
-        }
-        sync_presentation(app);
-        if let Err(e) = ui.show() {
-            settings_status(app, &e.to_string());
-            return;
-        }
-        let weak = ui.as_weak();
-        let _ = slint::spawn_local(async move {
-            if let Some(ui) = weak.upgrade() {
-                use slint::winit_030::{
-                    WinitWindowAccessor,
-                    winit::{platform::windows::WindowExtWindows, window::WindowLevel},
-                };
-                if let Ok(window) = ui.window().winit_window().await {
-                    window.set_skip_taskbar(false);
-                    window.set_window_level(WindowLevel::Normal);
-                    window.focus_window();
-                }
-            }
-        });
+    {
+        let mut a = app.borrow_mut();
+        a.settings_visible = true;
+        let now = a.now();
+        a.coordinator.suppress(true, now);
     }
+    sync_presentation(app);
+    if let Err(e) = ui.show() {
+        settings_status(app, &e.to_string());
+        close_preferences(app, false);
+        return;
+    }
+    let weak = ui.as_weak();
+    let app = Rc::downgrade(app);
+    let _ = slint::spawn_local(async move {
+        if let Some(ui) = weak.upgrade() {
+            use slint::winit_030::{
+                WinitWindowAccessor,
+                winit::{platform::windows::WindowExtWindows, window::WindowLevel},
+            };
+            if let Ok(window) = ui.window().winit_window().await
+                && app.upgrade().is_some_and(|a| a.borrow().settings_visible)
+            {
+                window.set_skip_taskbar(false);
+                window.set_window_level(WindowLevel::Normal);
+                window.focus_window();
+            }
+        }
+    });
+}
+
+pub(super) fn ensure_preferences(app: &Rc<RefCell<App>>) -> Option<SettingsWindow> {
+    if let Some(ui) = app.borrow().preferences() {
+        return Some(ui);
+    }
+    let ui = match SettingsWindow::new() {
+        Ok(ui) => ui,
+        Err(error) => {
+            record(&format!("Settings initialization failed: {error}"));
+            status(app, "Could not open Settings. Try again.");
+            return None;
+        }
+    };
+    crate::preferences::install_preview_renderer(&ui);
+    wire(app, &ui);
+    launcher::wire_preferences(app, &ui);
+    downloads::wire_preferences(app, &ui);
+    if let Some(updater) = app.borrow().updater.clone() {
+        updater.bind(&ui);
+    }
+    {
+        let mut a = app.borrow_mut();
+        if let Some(message) = a.settings_status.take() {
+            ui.set_status_text(message);
+        }
+        a.preferences = Some(ui.clone_strong());
+    }
+    downloads::refresh(app);
+    refresh_preferences(app);
+    Some(ui)
 }
 
 pub(super) fn close_preferences(app: &Rc<RefCell<App>>, hide: bool) {
-    let ui = app.borrow().preferences.upgrade();
+    let ui = app.borrow().preferences();
     if hide && let Some(ui) = ui {
         let _ = ui.hide();
     }
@@ -222,14 +271,14 @@ pub(super) fn close_preferences(app: &Rc<RefCell<App>>, hide: bool) {
     sync_presentation(app);
 }
 
-pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWindow) {
+fn wire(app: &Rc<RefCell<App>>, prefs: &SettingsWindow) {
     let preview_generation = Rc::new(std::cell::Cell::new(0u64));
     {
         let app = app.clone();
         let generation = preview_generation.clone();
         prefs.on_preview_changed(move || {
             generation.set(generation.get().wrapping_add(1));
-            if let Some(ui) = app.borrow().preferences.upgrade() {
+            if let Some(ui) = app.borrow().preferences() {
                 ui.set_preview_animating(false);
             }
             refresh_preferences(&app);
@@ -246,8 +295,12 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWi
         });
     }
     {
-        let app = app.clone();
-        ui.on_settings_requested(move || show_preferences(&app));
+        let weak = app.borrow().ui.clone();
+        prefs.on_manage_plugins(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_manage_plugins();
+            }
+        });
     }
     {
         let app = app.clone();
@@ -255,7 +308,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWi
             if app.borrow().settings_sync {
                 return;
             }
-            let ui = app.borrow().preferences.upgrade();
+            let ui = app.borrow().preferences();
             if let Some(ui) = ui {
                 for raw in [ui.get_fullscreen_always_hide_text(), ui.get_fullscreen_always_show_text()] {
                     if let Some(invalid) = raw.split([',', ';']).map(str::trim).filter(|name| !name.is_empty())
@@ -267,7 +320,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWi
                 let settings =
                     crate::preferences::read(&ui, &app.borrow().settings, &platform::monitors());
                 let persist = !app.borrow().verification;
-                settings_status(&app, "Saved locally on this PC.");
+                settings_status(&app, "");
                 apply_settings(&app, settings, persist);
             }
         });
@@ -305,7 +358,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWi
         let app = app.clone();
         let generation = preview_generation;
         prefs.on_preview_motion(move || {
-            let Some(ui) = app.borrow().preferences.upgrade() else {
+            let Some(ui) = app.borrow().preferences() else {
                 return;
             };
             let original = ui.get_preview_state();
@@ -330,7 +383,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWi
                     let Some(app) = weak.upgrade() else {
                         return;
                     };
-                    if let Some(ui) = app.borrow().preferences.upgrade() {
+                    if let Some(ui) = app.borrow().preferences() {
                         ui.set_preview_animating(animated);
                         ui.set_preview_state(state);
                     }

@@ -4,14 +4,30 @@ param(
     [string]$OutputDirectory,
     [string]$Version='0.2.0.0',
     [string]$Publisher='CN=StillIslandDevelopment',
-    [switch]$AllowDynamicCrt
+    [switch]$AllowDynamicCrt,
+    [switch]$Store
 )
 $ErrorActionPreference='Stop'
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if($Store){
+    if($AllowDynamicCrt){throw 'Store packages require the self-contained static CRT build.'}
+    if($PSBoundParameters.ContainsKey('Publisher')){throw 'Store publisher is controlled by packaging/store-identity.json.'}
+    $storeIdentity=Get-Content -LiteralPath (Join-Path $workspace 'packaging/store-identity.json') -Raw | ConvertFrom-Json
+    if($storeIdentity.name -notmatch '^[A-Za-z0-9.-]{3,50}$' -or $storeIdentity.publisher -notmatch '^CN=[0-9A-Fa-f-]{36}$' -or [string]::IsNullOrWhiteSpace($storeIdentity.publisherDisplayName)){throw 'Invalid Store identity.'}
+    $Publisher=$storeIdentity.publisher
+    if(!$PSBoundParameters.ContainsKey('Version')){
+        $cargoVersion=[version]((& "$PSScriptRoot/release-version.ps1").version)
+        # Store requires a nonzero major; offset all Cargo majors consistently.
+        $Version='{0}.{1}.{2}.0' -f ($cargoVersion.Major+1),$cargoVersion.Minor,$cargoVersion.Build
+    }
+    if(!$OutputDirectory){$OutputDirectory=Join-Path $workspace 'target/store'}
+}
 if(-not $OutputDirectory){$OutputDirectory=Join-Path $workspace 'target\msix'}
 $OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory)
 $parts=$Version.Split('.')
 if($parts.Count -ne 4 -or @($parts|Where-Object {$_ -notmatch '^\d+$' -or [uint64]$_ -gt 65535}).Count){throw 'Version must contain four integers in 0..65535'}
+if($Store -and [uint64]$parts[3] -ne 0){throw 'The Store reserves the fourth version component; it must be zero.'}
+if($Store -and [uint64]$parts[0] -eq 0){throw 'Store packages require a nonzero major version.'}
 if($Publisher -notmatch '^CN=' -or $Publisher.Contains([char]0)){throw 'Publisher must be a valid certificate subject beginning CN='}
 
 function Find-MakeAppx {
@@ -132,11 +148,18 @@ foreach($asset in Get-ChildItem -LiteralPath (Join-Path $workspace 'packaging\As
 [xml]$manifest=Get-Content -LiteralPath (Join-Path $workspace 'packaging\AppxManifest.xml') -Raw
 $manifest.Package.Identity.Version=$Version
 $manifest.Package.Identity.Publisher=$Publisher
+if($Store){
+    $manifest.Package.Identity.Name=$storeIdentity.name
+    $manifest.Package.Properties.PublisherDisplayName=$storeIdentity.publisherDisplayName
+    $manifest.Package.Properties.DisplayName=$storeIdentity.displayName
+    $manifest.Package.Applications.Application.VisualElements.DisplayName=$storeIdentity.displayName
+}
 $manifest.Save((Join-Path $stage 'AppxManifest.xml'))
 # Stable staged timestamps permit identical MSIX bytes from identical inputs.
 $epoch=[DateTime]::SpecifyKind([DateTime]'2026-01-01T00:00:00',[DateTimeKind]::Utc)
 foreach($file in Get-ChildItem -LiteralPath $stage -Recurse -File){$file.LastWriteTimeUtc=$epoch}
 $package=Join-Path $OutputDirectory "StillIsland_$($Version)_x64_unsigned.msix"
+if($Store){$package=Join-Path $OutputDirectory "StillIsland_$($Version)_x64_store.msix"}
 & $makeAppx pack /d $stage /p $package /o
 if($LASTEXITCODE -ne 0){throw "MakeAppx schema/content validation failed: $LASTEXITCODE"}
 Set-StableZipTimestamps $package
@@ -145,6 +168,13 @@ $validation=Join-Path $OutputDirectory ('validation-'+[Guid]::NewGuid().ToString
 if($LASTEXITCODE -ne 0){throw "Normalized MSIX content/block-map validation failed: $LASTEXITCODE"}
 $report=[ordered]@{NormalizedZipTimestamps=$true;UnpackValidation=$validation;Package=$package;Version=$Version;Publisher=$Publisher;Architecture='x64';Unsigned=$true;Stage=$stage;ExecutableSha256=(Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash;PackageSha256=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash;ImportedDlls=$dependencies;DynamicCrtImports=$dynamicCrt;ExternalGuiRuntimeImports=$forbidden;MakeAppx=$makeAppx;Installed=$false;ConsentRequested=$false}
 $report|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $OutputDirectory 'package-audit.json') -Encoding UTF8
+if($Store){
+    $report.StoreSubmission=$true
+    $report.IdentityName=$storeIdentity.name
+    $report.PublisherDisplayName=$storeIdentity.publisherDisplayName
+    $report.StoreId=$storeIdentity.storeId
+    $report|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $OutputDirectory 'package-audit.json') -Encoding UTF8
+}
 Write-Output "Created unsigned package: $package"
 Write-Output 'No package installation, certificate creation/import, signing, or permission request was performed.'
 if($dynamicCrt.Count){Write-Warning 'VALIDATION ONLY: this package uses a dynamically linked CRT. Do not distribute it as the self-contained package.'}

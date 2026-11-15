@@ -17,7 +17,7 @@ $suffix=if($Signed){''}else{'-unsigned'}
 $msixOutput=Join-Path $output "StillIsland-$Version-windows-x64$suffix.msix";Copy-Item -LiteralPath $msix -Destination $msixOutput -Force
 $assets=@($zip,$setupOutput,$msixOutput)
 $files=@($assets|ForEach-Object {[ordered]@{name=[IO.Path]::GetFileName($_);sha256=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant();bytes=(Get-Item -LiteralPath $_).Length}})
-[ordered]@{version=$Version;msix_version=$MsixVersion;platform='windows';architecture='x64';signed=[bool]$Signed;files=$files}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $output 'release-manifest.json') -Encoding utf8
+[ordered]@{schema_version=1;source_commit=(git rev-parse HEAD);version=$Version;msix_version=$MsixVersion;platform='windows';architecture='x64';signed=[bool]$Signed;files=$files}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $output 'release-manifest.json') -Encoding utf8
 $checksums=@($files|ForEach-Object {"$($_.sha256)  $($_.name)"})
 $checksums+="$((Get-FileHash -LiteralPath (Join-Path $output 'release-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant())  release-manifest.json"
 $checksums|Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS') -Encoding ascii

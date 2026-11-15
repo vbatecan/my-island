@@ -53,6 +53,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
         ui.on_timer_set_duration(move |seconds| {
             let mut a = app.borrow_mut();
             let now = a.now();
+            a.countdown_revision = a.countdown_revision.wrapping_add(1);
             a.countdown
                 .set_duration(seconds.clamp(1, 86400) as u64, now);
             a.coordinator.clear_timer(now);
@@ -66,6 +67,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
         ui.on_timer_toggle(move || {
             let mut a = app.borrow_mut();
             let now = a.now();
+            a.countdown_revision = a.countdown_revision.wrapping_add(1);
             if a.countdown.snapshot(now).running {
                 a.countdown.pause(now);
             } else {
@@ -83,6 +85,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
         ui.on_timer_reset(move || {
             let mut a = app.borrow_mut();
             let now = a.now();
+            a.countdown_revision = a.countdown_revision.wrapping_add(1);
             a.countdown.reset(now);
             a.coordinator.clear_timer(now);
             a.countdown_engaged = false;
@@ -112,6 +115,13 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
 
 fn set_hover(app: &Rc<RefCell<App>>, hover: bool) {
     if app.borrow().launcher.open {
+        return;
+    }
+    let can_hide = hover && hover_hide_eligible(&app.borrow());
+    if can_hide
+        && platform::hover_probe().is_some_and(|(_, _, pressed)| !pressed)
+        && request_hover_hide(app)
+    {
         return;
     }
     let idle = {
@@ -150,18 +160,60 @@ fn set_hover(app: &Rc<RefCell<App>>, hover: bool) {
     sync_presentation(app);
 }
 
+fn hover_hide_eligible(a: &App) -> bool {
+    a.visibility.hover_enabled(&a.settings)
+        && !a.visibility.protected_visit
+        && !a.visibility.hover_hidden
+        && !a.coordinator.panel_open()
+        && !a.settings_visible
+        && !a.pointer_pressed
+        && !a.launcher.open
+}
+
+/// Shared by pointer entry and the owned animation fixture.
+pub(super) fn request_hover_hide(app: &Rc<RefCell<App>>) -> bool {
+    {
+        let mut a = app.borrow_mut();
+        if !hover_hide_eligible(&a) {
+            return false;
+        }
+        a.visibility.hover_hidden = true;
+        a.visibility.edge_armed = false;
+        a.visibility.edge_deadline = None;
+        a.hover_intent.leave();
+        a.hover_timer.stop();
+        a.hover = false;
+        let now = a.now();
+        a.coordinator.set_hover(false, now);
+    }
+    sync_presentation(app);
+    true
+}
+
 /// Read current screen coordinates rather than a TouchArea's moving local
 /// origin. Called only on pointer/window events and existing animation frames.
 #[derive(Clone, Copy, Debug)]
 struct NativePointer {
     client: (f64, f64),
     screen: (f64, f64),
-    on_window: bool,
+    inside: bool,
 }
 
 fn base_coordinates(point: (i32, i32), dpi: u32, zoom: f64) -> (f64, f64) {
     let scale = f64::from(dpi.max(96)) / 96. * zoom;
     (f64::from(point.0) / scale, f64::from(point.1) / scale)
+}
+
+fn contains_pointer(a: &App, (x, y): (f64, f64)) -> bool {
+    crate::gestures::contains_in_canvas(
+        x,
+        y,
+        a.springs[0].position,
+        a.springs[1].position,
+        a.springs[2].position,
+        a.settings.form_factor,
+        a.canvas_size.0,
+    )
 }
 
 fn native_pointer(app: &Rc<RefCell<App>>) -> Option<NativePointer> {
@@ -194,17 +246,25 @@ fn native_pointer(app: &Rc<RefCell<App>>) -> Option<NativePointer> {
             if GetCursorPos(&mut screen).is_err() {
                 return;
             }
-            let target = WindowFromPoint(screen);
-            let on_window = target == hwnd || GetAncestor(target, GA_ROOT) == hwnd;
             let mut client = screen;
             if !ScreenToClient(hwnd, &mut client).as_bool() {
                 return;
             }
             let dpi = GetDpiForWindow(hwnd);
+            let client = base_coordinates((client.x, client.y), dpi, zoom);
+            let in_contour = {
+                let a = app.borrow();
+                !a.visibility.hiding && contains_pointer(&a, client)
+            };
+            // Resolve the native hit target only for a possible island hit.
+            let inside = in_contour && {
+                let target = WindowFromPoint(screen);
+                target == hwnd || GetAncestor(target, GA_ROOT) == hwnd
+            };
             result = Some(NativePointer {
-                client: base_coordinates((client.x, client.y), dpi, zoom),
+                client,
                 screen: base_coordinates((screen.x, screen.y), dpi, zoom),
-                on_window,
+                inside,
             });
         }
     });
@@ -214,34 +274,88 @@ fn native_pointer(app: &Rc<RefCell<App>>) -> Option<NativePointer> {
 /// Reconcile after contour changes too: the silhouette can leave a stationary
 /// pointer without producing a fresh CursorMoved event. No work is scheduled idle.
 pub(super) fn refresh_pointer(app: &Rc<RefCell<App>>) {
+    reconcile_pointer(app);
+}
+
+fn reconcile_pointer(app: &Rc<RefCell<App>>) -> Option<NativePointer> {
     if app.borrow().verification {
-        return;
+        return None;
     }
     let observed = native_pointer(app);
-    let inside = {
-        let mut a = app.borrow_mut();
-        a.pointer = observed.map(|pointer| pointer.client);
-        observed.is_some_and(|pointer| {
-            !a.hidden
-                && !a.visibility.hiding
-                && pointer.on_window
-                && crate::gestures::contains_in_canvas(
-                    pointer.client.0,
-                    pointer.client.1,
-                    a.springs[0].position,
-                    a.springs[1].position,
-                    a.springs[2].position,
-                    a.settings.form_factor,
-                    a.canvas_size.0,
-                )
-        })
-    };
+    app.borrow_mut().pointer = observed.map(|pointer| pointer.client);
+    let inside = observed.is_some_and(|pointer| pointer.inside);
     if inside != app.borrow().hover && verification::has_arg("--trace-hover") {
         record(&format!(
             "pointer edge observed={observed:?} inside={inside}"
         ));
     }
     set_hover(app, inside);
+    observed
+}
+
+/// Desktop observation is event driven; only an active edge hold owns a deadline.
+pub(super) fn hover_probe(app: &Rc<RefCell<App>>) {
+    let track_edge = {
+        let a = app.borrow();
+        if !a.visibility.hover_enabled(&a.settings) {
+            return;
+        }
+        a.visibility.hover_hidden || a.visibility.protected_visit
+    };
+    if !track_edge {
+        refresh_pointer(app);
+        return;
+    }
+    let Some((edge, visit, pressed)) = platform::hover_probe() else {
+        return;
+    };
+    let mut arm = None;
+    let mut revealed = false;
+    {
+        let mut a = app.borrow_mut();
+        let now = a.now();
+        if a.visibility.hover_hidden {
+            let old_deadline = a.visibility.edge_deadline;
+            revealed = a.visibility.observe_edge(now, edge, pressed);
+            if a.visibility.edge_deadline != old_deadline {
+                arm = a.visibility.edge_deadline;
+            }
+        } else if a.visibility.protected_visit
+            && !visit
+            && !pressed
+            && !a.coordinator.panel_open()
+            && !a.launcher.open
+            && !a.settings_visible
+            && a.slide.position.abs() < 0.01
+        {
+            a.visibility.protected_visit = false;
+        }
+    }
+    if let Some(end) = arm {
+        schedule_edge_hold(app, end);
+    }
+    if revealed {
+        sync_presentation(app);
+    }
+    refresh_pointer(app);
+}
+
+fn schedule_edge_hold(app: &Rc<RefCell<App>>, end: u64) {
+    let delay = end.saturating_sub(app.borrow().now()).max(1);
+    let weak = Rc::downgrade(app);
+    slint::Timer::single_shot(Duration::from_millis(delay), move || {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.borrow().visibility.edge_deadline != Some(end) {
+            return;
+        }
+        if app.borrow().now() < end {
+            schedule_edge_hold(&app, end);
+        } else {
+            hover_probe(&app);
+        }
+    });
 }
 
 fn release_pointer(app: &Rc<RefCell<App>>) {
@@ -263,6 +377,7 @@ pub(super) fn schedule_hover(app: &Rc<RefCell<App>>) {
         if !a.hover
             || !a.settings.hover_expand
             || a.hidden
+            || a.visibility.hover_hidden
             || a.settings_visible
             || a.coordinator.panel_open()
         {
@@ -370,6 +485,9 @@ pub(super) fn sync_countdown(app: &Rc<RefCell<App>>) {
         let now = a.now();
         let snapshot = a.countdown.snapshot(now);
         let finished = a.countdown.take_finished(now);
+        if finished {
+            a.countdown_revision = a.countdown_revision.wrapping_add(1);
+        }
         let active = a.countdown_engaged && snapshot.remaining_seconds > 0;
         a.coordinator.set_timer(active, finished, now);
         if let Some(ui) = a.ui.upgrade() {
@@ -453,8 +571,11 @@ pub(super) fn handle_overlay_input(
             | WindowEvent::Moved(_)
             | WindowEvent::Occluded(_)
             | WindowEvent::ScaleFactorChanged { .. }
-    ) || (matches!(event, WindowEvent::RedrawRequested)
-        && !app.borrow().hover);
+    ) || (matches!(event, WindowEvent::RedrawRequested) && {
+        let a = app.borrow();
+        // The morph timer already reconciles after a contour update.
+        !a.hover && !a.timer.running()
+    });
     if reconcile_after_event && !app.borrow().verification {
         let weak = Rc::downgrade(app);
         slint::Timer::single_shot(Duration::from_millis(1), move || {
@@ -469,9 +590,9 @@ pub(super) fn handle_overlay_input(
             | WindowEvent::CursorEntered { .. }
             | WindowEvent::CursorLeft { .. }
     ) {
-        refresh_pointer(app);
+        let pointer = reconcile_pointer(app);
         if matches!(event, WindowEvent::CursorMoved { .. })
-            && let Some(pointer) = native_pointer(app)
+            && let Some(pointer) = pointer
         {
             let mut a = app.borrow_mut();
             let now = a.now();
@@ -517,20 +638,19 @@ pub(super) fn handle_overlay_input(
             app.borrow_mut().pointer_pressed = true;
         }
     }
+    if !matches!(
+        event,
+        WindowEvent::MouseWheel { .. }
+            | WindowEvent::MouseInput {
+                button: MouseButton::Middle,
+                ..
+            }
+    ) {
+        return EventResult::Propagate;
+    }
     let inside = {
         let a = app.borrow();
-        !a.hidden
-            && a.pointer.is_some_and(|(x, y)| {
-                crate::gestures::contains_in_canvas(
-                    x,
-                    y,
-                    a.springs[0].position,
-                    a.springs[1].position,
-                    a.springs[2].position,
-                    a.settings.form_factor,
-                    a.canvas_size.0,
-                )
-            })
+        !a.hidden && a.pointer.is_some_and(|point| contains_pointer(&a, point))
     };
     if !inside {
         return EventResult::Propagate;
