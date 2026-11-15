@@ -1,6 +1,6 @@
 # Automatic updates
 
-Pushes to main run checks and create a versioned release commit/tag without changing main. The release pipeline is called explicitly because tags pushed by GITHUB_TOKEN do not trigger another push workflow. Version bumps are based on existing stable tags; a higher explicitly chosen Cargo version wins. MSIX auto-update is deferred.
+Pushes to main run checks and build a release from the checked commit. Version selection uses existing stable tags, with a higher explicitly chosen Cargo version taking precedence. The build updates Cargo.toml and Cargo.lock in its checkout. GitHub creates the release tag on the checked source commit when the release is published. MSIX auto-update is deferred.
 
 Distributed builds check GitHub after 30 seconds and daily thereafter. Settings → Updates also permits a manual check. Downloads are automatic and applying them requires Update and restart. Opt-out is stored under the local updates directory. Installer detection uses the per-user uninstall registration; portable replacement uses a backup. Download hashes and lengths are checked, with additional signature validation for signed releases. Helpers run without a visible console. Windows' bundled curl.exe supplies HTTPS transport through a hidden PowerShell helper, rather than introducing another Rust networking stack.
 

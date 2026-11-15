@@ -27,13 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag && github.sha || github.ref }}
           persist-credentials: false
-      - name: Validate tag and Cargo version
-        id: version
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-        run: ./scripts/release-version.ps1 -Tag $env:RELEASE_TAG -OutputFile $env:GITHUB_OUTPUT
       - name: Install stable Rust
         id: rust
         run: |
@@ -50,6 +45,16 @@ jobs:
             target/msix-build
           key: windows-static-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: windows-static-${{ steps.rust.outputs.version }}-
+      - name: Set automatic release build version
+        if: inputs.release_tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: ./scripts/prepare-auto-release.ps1 -ReleaseTag $env:RELEASE_TAG
+      - name: Validate tag and Cargo version
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: ./scripts/release-version.ps1 -Tag $env:RELEASE_TAG -OutputFile $env:GITHUB_OUTPUT
       - name: Install portable Inno compiler
         env:
           GH_TOKEN: ${{ github.token }}
@@ -114,15 +119,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          AUTOMATIC_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
           cd assets
           sha256sum --check SHA256SUMS
-          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > draft.txt 2>/dev/null; then
-            test "$(cat draft.txt)" = true || { echo 'Refusing to overwrite an already-published version'; exit 1; }
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish 2>/dev/null); then
+            test "$(jq -r .isDraft <<< "$draft")" = true || { echo 'Refusing to overwrite an already-published version'; exit 1; }
+            if [[ -n "$AUTOMATIC_TAG" && "$(jq -r .targetCommitish <<< "$draft")" != "$SOURCE_SHA" ]]; then
+              echo 'Existing release draft targets a different commit'
+              exit 1
+            fi
           else
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Still Island $RELEASE_TAG" --generate-notes --notes-file release-notes.md
+            target=(--verify-tag)
+            if [[ -n "$AUTOMATIC_TAG" ]]; then
+              target=(--target "$SOURCE_SHA")
+            fi
+            gh release create "$RELEASE_TAG" "${target[@]}" --draft --title "Still Island $RELEASE_TAG" --generate-notes --notes-file release-notes.md
           fi
           gh release upload "$RELEASE_TAG" ./*.exe ./*.zip ./*.msix SHA256SUMS release-manifest.json --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest
