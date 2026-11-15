@@ -1,13 +1,23 @@
 # Still Island
 
-**Liquid Glass** is available in Settings → Appearance → Island material (`appearance=liquid-glass`). It preserves backdrop colors with a slight dark tint, adaptive foreground colors, and GPU-rendered blur and refractive edges. Capture is bounded to 30fps and stops while hidden; unavailable live capture falls back to snapshots without changing the saved material. The existing material selection remains unchanged. `--verify-liquid --appearance=liquid-glass` captures deterministic material states and checks dark and saturated backdrop colors. See [Liquid Glass verification](LIQUID-GPU-VERIFICATION.md) for measurements and remaining limitations.
+Folder activity is available in **Settings → Downloads**. Enable monitoring for the Windows Downloads folder or add custom folders. The **Downloads** island page shows recent file additions and changes with **Show in folder** actions. Monitoring is off by default, watches immediate contents only, and keeps up to 100 entries for 30 minutes in memory. It needs no browser extensions and does not report download percentages or confirmed completion. Temporary download files are filtered. Very rapid changes may be skipped with a recovery message; use Retry in Settings for unavailable folders.
+
+`--verify-downloads --isolated-material-probe --appearance=solid` runs an isolated real-watcher fixture and captures empty/active Downloads states without desktop input or changes to saved preferences.
+
+**Liquid Glass** is available in Settings → Appearance → Island material (`appearance=liquid-glass`). It preserves backdrop colors with a slight dark tint, adaptive foreground colors, and GPU-rendered blur and refractive edges. Capture runs at up to 60 updates per second while visible. `--verify-liquid --appearance=liquid-glass` captures deterministic material states and checks dark and saturated backdrop colors. See [Liquid Glass verification](LIQUID-GPU-VERIFICATION.md) for earlier measurements.
 
 The launcher also searches Windows settings and tools (try `Bluetooth`, `uninstall programs`, or `Task Manager`). Type `(50 + 20) / 2` or `5 ft to cm` for local fend calculations, or `100 USD to SGD` for currency conversion. A selected answer copies with Enter and contracts the notch. Currency uses Frankfurter reference rates cached for six hours; only the currency pair is sent, never the amount. Settings → Behavior contains independent provider toggles. Expressions are not saved.
 
 
 Press **Alt + Space** to morph the notch into a native application launcher. Search Start Menu shortcuts and installed Windows apps, select with Up/Down, launch with Enter, and dismiss with Escape or an outside click. Settings → Behavior lets you disable the shortcut or choose Ctrl + Space / Alt + Shift + Space. Shortcut conflicts are reported in Settings. Ctrl + Alt + Space retains its existing island-panel toggle.
 
-Search ranks exact names before prefixes and fuzzy matches. Blank search shows recent successful launches, followed by alphabetical suggestions. Recent IDs stay locally in `launcher-recent.json` next to settings; clear them in Settings. Windows resolves shortcut arguments and working directories. Native icons are loaded for the current DPI and held in a bounded cache. Discovery and icon work run on demand; reopening after a minute refreshes the catalog without background polling.
+Search ranks exact names before prefixes and fuzzy matches. Blank search shows pins, recent successful launches, and alphabetical suggestions in that order. Recent IDs stay locally in `launcher-recent.json` next to settings. Clear them in Settings. Windows resolves shortcut arguments and working directories. Native icons are loaded for the current DPI and held in a bounded cache. Discovery and icon work run on demand. Reopening after a minute refreshes the catalog.
+
+Press **Ctrl + K** to open actions for the selected result. Pin an item to put it above recent launches, or choose **Add shortcut** to save an alias for a folder path or an HTTP(S) URL. Type the alias and press Enter to open it. The same menu lets you edit or remove saved shortcuts. Pins and shortcuts are stored locally alongside settings.
+
+Type `file` followed by part of a file or folder name, such as `file invoice`, to search the Windows Search index. Each result shows its parent folder. Press **Enter** to open the selected result, or **Ctrl + K** for **Show in Explorer** and **Copy path**. Results depend on which locations Windows indexes.
+
+Start with `@` to search apps, Windows settings, and saved shortcuts by name. For example, `@file explorer` finds the app. Start with `>` to run a Windows command such as `> ipconfig`. Press **Enter** to run it in a new Command Prompt window, which stays open so you can read the output.
 
 The launcher shares the persistent overlay and its interruptible spring geometry. It receives keyboard focus only when explicitly invoked. Notifications wait while you type, and dismissal restores normal presentation priority without overwriting the remembered page. The resource budget for this two-mode application is now **150 MB maximum**, with release private bytes and working set measured separately; this is a target, not a universal guarantee.
 
@@ -86,6 +96,8 @@ Development checks: `--verify-notifications` uses synthetic records and never as
 
 ## Build and run
 
+Distributed installer and portable builds can download GitHub updates automatically. Open **Settings → Updates** to check manually, opt out, or choose **Update and restart**. The first updater-enabled release needs a manual installation. MSIX updates remain manual. See [automatic release and update details](AUTO-UPDATE.md).
+
 Install stable Rust (MSVC) and Visual Studio Build Tools with Desktop development with C++ and the Windows SDK. Minimum Rust1.92; built here with1.99.1, Slint1.18.1, windows0.62.2.
 
 ```powershell
@@ -125,12 +137,9 @@ Not every player exposes SMTC or every transport capability. If a player does no
 
 ## Materials and glass mathematics
 
-Transparent material uses the desktop composition surface directly. Acrylic uses a sampled, blurred desktop texture clipped to the exact island contour and the selected tint. The whole-window Windows backdrop is deliberately disabled: it can paint the persistent transparent canvas gray outside the notch. Acrylic refreshes on desktop/window events rather than continuously.
+Transparent material uses the desktop composition surface directly. Acrylic uses a live, blurred backdrop clipped to the island contour and shaded with the selected tint. Glass uses a refractive bevel around the same contour. Filtering happens on the capture worker, and the GPU applies the material as the contour animates.
 
-Both glass modes have actual **backdrop refraction**, rather than only a shiny border. The overlay is excluded from capture to prevent feedback. Pixels are filtered and refracted into a Slint bitmap; Slint continues to render the UI and spring morphs.
-
-- **Eco glass** (`--appearance=glass`) samples the desktop through GDI on hover/click/state transitions and foreground/top-level-window changes. It has no capture worker or refresh timer. Its backdrop stays frozen between these events, so an underlying video does not update continuously.
-- **Live glass** (`--appearance=live-glass`) uses borderless Windows Graphics Capture, a low-memory copy device (with hardware fallback and a developer `--capture-hardware` comparison option), one buffer, dirty-region checks, and a30FPS backdrop ceiling. Only the canvas crop is read back. Significant pixel changes are coalesced; tiny compositor dithering is ignored. This30FPS ceiling applies to the backdrop, independently of spring animation scheduling.
+Acrylic, Glass, and Liquid Glass use borderless Windows Graphics Capture while visible. Capture reads back the canvas crop and redraws when it changes. **Glass · Eco** (`--appearance=glass`) updates at up to 30 times per second. Acrylic, **Glass · Live** (`--appearance=live-glass`), and Liquid Glass update at up to 60 times per second. The capture rate is independent of the spring animation rate.
 
 For a point `p` relative to the shape center, half-size `b`, radius `r`:
 
@@ -147,11 +156,11 @@ T = eta I - (eta dot(N,I) + sqrt(k)) N
 sample_offset = T.xy / -T.z * optical_depth
 ```
 
-Bilinear backdrop sampling follows that offset. Schlick's approximation adds grazing-angle reflection: `F=F0+(1-F0)(1-N.z)^5`, with `F0=((1.45-1)/(1.45+1))²`. A separable soft prefilter reduces competing backdrop text. The implementation is in `src/material.rs`, with finite-ray, normal-incidence, SDF-gradient, interpolation, and bounce tests. This is a screen-space lens approximation, not full scene ray tracing.
+Bilinear backdrop sampling follows that offset. Schlick's approximation adds grazing-angle reflection using `F=F0+(1-F0)(1-N.z)^5`, with `F0=((1.45-1)/(1.45+1))²`. A separable soft prefilter reduces competing backdrop text. The shader is in `src/liquid.frag`. The CPU fallback and optics tests are in `src/material.rs`.
 
 Research references: [Windows backdrop types](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type), [Khronos GLSL refraction specification](https://registry.khronos.org/OpenGL/specs/es/3.1/GLSL_ES_Specification_3.10.pdf), [Microsoft's native composition/capture samples](https://github.com/microsoft/Windows.UI.Composition-Win32-Samples), and [capture exclusion semantics](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity).
 
-Live glass is an optional higher-cost material. See [current material verification](MATERIALS-VERIFICATION.md) for release memory and CPU measurements; older MVP figures do not represent the launcher-sized scenes. Its capture resources exist only while selected. Eco glass avoids that capture stack; unchanged sampled backdrops do not cause UI updates. The WinEvent hooks exclude the overlay's own process and ignore child-control movements, preventing refresh feedback. **Acrylic and glass are omitted from normal screen captures/recordings** because capture exclusion is required to prevent feedback. Internal `--verify` captures can still render it. Backdrop pixels stay in RAM; they are never sent over the network or written to disk during normal use. Explicit verification captures write local BMPs. If borderless capture is unsupported, live glass falls back to acrylic with an error message, without requesting a permission prompt or changing Windows security settings.
+Capture stops when the notch is hidden. **Acrylic and glass are omitted from normal screen recordings** to keep the overlay out of its own backdrop. When Windows cannot start live capture with the overlay excluded, Still Island can use snapshots with the selected material. Backdrop pixels stay in memory during normal use. The owned live test, `scripts/test-liquid-gpu.ps1 -LiveAppearance acrylic` or `-LiveAppearance glass`, repaints a window behind the notch and verifies the refreshed material.
 
 ## Architecture and verification
 

@@ -413,7 +413,7 @@ fn action_value(root: Option<&Node>, action: &str, text: &str) -> Value {
         Value::String(text.into())
     }
 }
-pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWindow) {
+pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let verifying = std::env::args().any(|arg| arg == "--verify-plugins");
     if app.borrow().verification && !verifying {
         return;
@@ -474,14 +474,6 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow, prefs: &SettingsWi
         let w = window.clone();
         let state = state.clone();
         ui.on_manage_plugins(move || {
-            state.borrow_mut().manager_open = true;
-            show_manager(&w)
-        });
-    }
-    {
-        let w = window.clone();
-        let state = state.clone();
-        prefs.on_manage_plugins(move || {
             state.borrow_mut().manager_open = true;
             show_manager(&w)
         });

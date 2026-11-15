@@ -11,6 +11,23 @@ component Note inherits Text { font-size: 11px; color: #a6a6b2; wrap: word-wrap;
 component Rule inherits Rectangle { height: 1px; background: #ffffff12; vertical-stretch: 0; }
 
 export component SettingsWindow inherits Window {
+    in-out property <bool> folders-enabled;
+    in-out property <bool> watch-downloads;
+    in property <[string]> watched-folders;
+    in property <string> folder-status;
+    callback folders-toggle(bool);
+    callback downloads-toggle(bool);
+    callback folder-add();
+    callback folder-remove(int);
+    in property <string> update-status;
+    in property <bool> update-busy: false;
+    in property <bool> update-ready: false;
+    in property <bool> update-packaged: false;
+    in property <bool> update-store: false;
+    in-out property <bool> auto-update: true;
+    callback check-update();
+    callback install-update();
+    callback auto-update-changed(bool);
     title: "Still Island Settings";
     preferred-width: 600px; preferred-height: 680px;
     min-width: 560px; min-height: 640px;
@@ -68,6 +85,8 @@ export component SettingsWindow inherits Window {
     in-out property <bool> compact-now-playing: true;
     in-out property <bool> online-lyrics: true;
     in-out property <bool> hover-expand: false;
+    in-out property <bool> hide-on-hover: false;
+    in-out property <bool> hover-only-maximized: false;
     in-out property <int> hover-delay: 350;
     in-out property <int> collapse-delay: 350;
     in-out property <bool> scroll-volume: true;
@@ -174,7 +193,7 @@ export component SettingsWindow inherits Window {
                         }
                         Heading { text: "Material"; }
                         ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live", "Liquid Glass"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
-                        Note { text: root.appearance-index == 5 ? "Pale glass with live blur, dark controls and polished edges." : root.appearance-index == 4 ? "Live glass follows the desktop. It uses more graphics resources than Eco glass." : root.appearance-index == 3 ? "Eco glass refreshes its backdrop on interaction and display changes." : "Use transparency and tint to balance lightness with readable controls."; }
+                        Note { text: root.appearance-index == 5 ? "Live refractive glass with adaptive controls." : root.appearance-index == 4 ? "Glass follows the desktop at up to 60 updates per second." : root.appearance-index == 3 ? "Eco glass follows the desktop at up to 30 updates per second." : root.appearance-index == 2 ? "Acrylic blurs the desktop as it changes." : "Use transparency and tint to balance lightness with readable controls."; }
                         HorizontalLayout {
                             spacing: 12px;
                             Label { text: "Transparency / black tint"; }
@@ -195,10 +214,37 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 }
-                Tab { title: "Notifications";
-                    ScrollView {
-                    x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    PageLayout {
+                Tab { title: "Interaction"; ScrollView { PageLayout {
+                        Heading { text: "Interaction"; }
+                        CheckBox { text: "Hide on hover"; checked <=> root.hide-on-hover; toggled => { root.changed(); } }
+                        HorizontalLayout { padding-left: 22px; CheckBox { text: "Only over maximized apps"; enabled: root.hide-on-hover; checked <=> root.hover-only-maximized; toggled => { root.changed(); } } }
+                        Note { text: "Move over the island to hide it. Hold the top edge above it to bring it back."; }
+                        CheckBox { text: "Expand on hover"; checked <=> root.hover-expand; toggled => { root.changed(); } }
+                        FieldRow { FieldLabel { text: "Hover delay (milliseconds)"; } SpinBox { accessible-label: "Hover delay in milliseconds"; minimum: 200; maximum: 2000; step-size: 50; value <=> root.hover-delay; enabled: root.hover-expand; edited => { root.changed(); } }
+                        }
+                        Note { text: "Pause the pointer to expand. Moving across the island resets the hover delay. Pin a panel to keep it open."; }
+                        FieldRow { FieldLabel { text: "Collapse delay (milliseconds)"; } SpinBox { accessible-label: "Collapse delay in milliseconds"; minimum: 0; maximum: 2000; step-size: 50; value <=> root.collapse-delay; edited => { root.changed(); } }
+                        }
+                        CheckBox { text: "Scroll compact notch or volume controls to adjust volume"; checked <=> root.scroll-volume; toggled => { root.changed(); } }
+                        Note { text: "Scroll elsewhere in the expanded notch to switch pages. Lyrics and long integration views scroll normally. The selected page stays compact when you leave."; }
+                        FieldRow { FieldLabel { text: "Volume change per wheel notch (%)"; } SpinBox { accessible-label: "Volume step percent"; minimum: 1; maximum: 10; value <=> root.volume-step; enabled: root.scroll-volume; edited => { root.changed(); } }
+                        }
+                        CheckBox { text: "Middle-click island to mute / unmute"; checked <=> root.middle-mute; toggled => { root.changed(); } }
+                        CheckBox { text: "Collapse on outside click"; checked <=> root.outside-click; toggled => { root.changed(); } }
+                        CheckBox { text: "Enable Ctrl + Alt + Space shortcut"; checked <=> root.shortcut-enabled; toggled => { root.changed(); } }
+                        CheckBox { text: "Enable application launcher shortcut"; checked <=> root.launcher-enabled; toggled => { root.changed(); } }
+                        ComboBox { model: ["Alt + Space", "Ctrl + Space", "Alt + Shift + Space"]; current-index <=> root.launcher-shortcut; enabled: root.launcher-enabled; selected(_) => { root.changed(); } }
+                        CheckBox { text: "Search Windows settings and tools"; checked <=> root.launcher-windows; toggled => { root.changed(); } }
+                        CheckBox { text: "Calculator and unit conversions"; checked <=> root.launcher-calculator; toggled => { root.changed(); } }
+                        CheckBox { text: "Currency conversion (Frankfurter)"; checked <=> root.launcher-currency; toggled => { root.changed(); } }
+                        Button { text: "Clear recent launches"; clicked => { root.clear-launcher-history(); } }
+                        Note { text: "Launcher mode receives keyboard focus for search. Enter launches, arrows select, Escape closes. Ordinary island panels stay nonactivating. Shortcut conflicts are reported here."; }
+                        Rule {}
+
+                    } }
+                }
+                Tab { title: "Activities"; ScrollView { PageLayout {
+
                         Heading { text: "Notification previews"; }
                         Note { text: root.notification-access; }
                         HorizontalLayout {
@@ -221,18 +267,7 @@ export component SettingsWindow inherits Window {
                             text: app.app-name; checked: app.enabled;
                             toggled => { root.app-filter-changed(app.app-id, self.checked); }
                         }
-                    }
-                }
-                }
-                Tab { title: "Behavior";
-                    ScrollView {
-                    x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    PageLayout {
-                        Heading { text: "Windows startup"; }
-                        CheckBox { text: "Start Still Island when I sign in"; enabled: root.startup-available; checked <=> root.launch-at-startup; toggled => { root.changed(); } }
-                        Note { text: root.startup-status; }
-                        Rule {}
-                        Heading { text: "Automatic activity"; }
+                                            Heading { text: "Automatic activity"; }
                         CheckBox { text: "Show system volume changes"; checked <=> root.auto-volume; toggled => { root.changed(); } }
                         Note { text: "Volume feedback stays small while you are using an open panel."; }
                         CheckBox { text: "Show battery previews"; checked <=> root.battery-previews; toggled => { root.changed(); } }
@@ -241,45 +276,24 @@ export component SettingsWindow inherits Window {
                         CheckBox { text: "Look up lyrics online"; checked <=> root.online-lyrics; toggled => { root.changed(); } }
                         Note { text: "When the media panel opens, send track title, artist, album and duration to LRCLIB to find lyrics. No audio is recorded or sent."; }
                         Rule {}
-                        Heading { text: "Interaction"; }
-                        CheckBox { text: "Expand on hover"; checked <=> root.hover-expand; toggled => { root.changed(); } }
-                        FieldRow { FieldLabel { text: "Hover delay (milliseconds)"; } SpinBox { accessible-label: "Hover delay in milliseconds"; minimum: 200; maximum: 2000; step-size: 50; value <=> root.hover-delay; enabled: root.hover-expand; edited => { root.changed(); } }
-                        }
-                        Note { text: "Pause the pointer to expand. Moving across the island resets the hover delay. Pin a panel to keep it open."; }
-                        FieldRow { FieldLabel { text: "Collapse delay (milliseconds)"; } SpinBox { accessible-label: "Collapse delay in milliseconds"; minimum: 0; maximum: 2000; step-size: 50; value <=> root.collapse-delay; edited => { root.changed(); } }
-                        }
-                        CheckBox { text: "Scroll compact notch or volume controls to adjust volume"; checked <=> root.scroll-volume; toggled => { root.changed(); } }
-                        Note { text: "Scroll elsewhere in the expanded notch to switch pages. Lyrics and long integration views scroll normally. The selected page stays compact when you leave."; }
-                        FieldRow { FieldLabel { text: "Volume change per wheel notch (%)"; } SpinBox { accessible-label: "Volume step percent"; minimum: 1; maximum: 10; value <=> root.volume-step; enabled: root.scroll-volume; edited => { root.changed(); } }
-                        }
-                        CheckBox { text: "Middle-click island to mute / unmute"; checked <=> root.middle-mute; toggled => { root.changed(); } }
-                        CheckBox { text: "Collapse on outside click"; checked <=> root.outside-click; toggled => { root.changed(); } }
-                        CheckBox { text: "Enable Ctrl + Alt + Space shortcut"; checked <=> root.shortcut-enabled; toggled => { root.changed(); } }
-                        CheckBox { text: "Enable application launcher shortcut"; checked <=> root.launcher-enabled; toggled => { root.changed(); } }
-                        ComboBox { model: ["Alt + Space", "Ctrl + Space", "Alt + Shift + Space"]; current-index <=> root.launcher-shortcut; enabled: root.launcher-enabled; selected(_) => { root.changed(); } }
-                        CheckBox { text: "Search Windows settings and tools"; checked <=> root.launcher-windows; toggled => { root.changed(); } }
-                        CheckBox { text: "Calculator and unit conversions"; checked <=> root.launcher-calculator; toggled => { root.changed(); } }
-                        CheckBox { text: "Currency conversion (Frankfurter)"; checked <=> root.launcher-currency; toggled => { root.changed(); } }
-                        Button { text: "Clear recent launches"; clicked => { root.clear-launcher-history(); } }
-                        Note { text: "Launcher mode receives keyboard focus for search. Enter launches, arrows select, Escape closes. Ordinary island panels stay nonactivating. Shortcut conflicts are reported here."; }
-                        Rule {}
-                        CheckBox { text: "Hide over fullscreen apps"; checked <=> root.fullscreen-hide; toggled => { root.changed(); } }
-                        Heading { text: "Per-app fullscreen rules"; }
-                        Note { text: "Automatic is the default. Enter executable names separated by commas, for example game.exe, player.exe. Always hide also applies while windowed; it wins if a name appears in both lists."; }
-                        Label { text: "Always hide over these apps"; }
-                        LineEdit { accessible-label: "Always hide over executables"; text <=> root.fullscreen-always-hide-text; placeholder-text: "game.exe, player.exe"; accepted => { root.changed(); } }
-                        Label { text: "Always show over these apps"; }
-                        LineEdit { accessible-label: "Always show over executables"; text <=> root.fullscreen-always-show-text; placeholder-text: "editor.exe"; accepted => { root.changed(); } }
-                        Button { text: "Apply app rules"; clicked => { root.changed(); } }
-                        Note { text: "Clear a name to return that app to automatic detection. The .exe extension may be omitted; paths and wildcard patterns are not used. Lock-screen hiding is always respected."; }
 
-                    }
+                        CheckBox { text: "Monitor folder activity"; checked <=> root.folders-enabled; toggled => { root.folders-toggle(self.checked); } }
+                        CheckBox { text: "Watch Windows Downloads"; checked <=> root.watch-downloads; toggled => { root.downloads-toggle(self.checked); } }
+                        Note { text: "Shows file changes, without download percentages or completion claims."; }
+                        Button { text: "Add folder…"; clicked => { root.folder-add(); } }
+                        ScrollView { VerticalLayout { for folder[index] in root.watched-folders : HorizontalLayout {
+                            Label { text: folder; overflow: elide; horizontal-stretch: 1; }
+                            Button { text: "Remove"; clicked => { root.folder-remove(index); } }
+                        } } }
+                        Note { text: root.folder-status; }
+                        Button { text: "Retry"; clicked => { root.folders-toggle(root.folders-enabled); } }
+
+ Button { text: "Plugins…"; clicked => { root.manage-plugins(); } }
+
+                    } }
                 }
-                }
-                Tab { title: "Display";
-                    ScrollView {
-                    x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    PageLayout {
+                Tab { title: "Visibility"; ScrollView { PageLayout {
+
                         Heading { text: "Placement"; }
                         Label { text: "Display"; }
                         ComboBox { accessible-label: "Overlay display"; model: root.monitor-names; current-index <=> root.monitor-index; selected => { root.changed(); } }
@@ -291,15 +305,43 @@ export component SettingsWindow inherits Window {
                         Rule {}
                         Heading { text: "A little breathing room"; }
                         Note { text: "The island stays centered on the chosen display. Empty space around its current shape remains available to the desktop."; }
-                    }
+                                            CheckBox { text: "Hide over fullscreen apps"; enabled: !(root.hide-on-hover && root.hover-only-maximized); checked: root.fullscreen-hide || (root.hide-on-hover && root.hover-only-maximized); toggled => { root.fullscreen-hide = self.checked; root.changed(); } }
+                        Heading { text: "Per-app fullscreen rules"; }
+                        Note { text: "Automatic is the default. Enter executable names separated by commas, for example game.exe, player.exe. Always hide also applies while windowed; it wins if a name appears in both lists."; }
+                        Label { text: "Always hide over these apps"; }
+                        LineEdit { accessible-label: "Always hide over executables"; text <=> root.fullscreen-always-hide-text; placeholder-text: "game.exe, player.exe"; accepted => { root.changed(); } }
+                        Label { text: "Always show over these apps"; }
+                        LineEdit { accessible-label: "Always show over executables"; text <=> root.fullscreen-always-show-text; placeholder-text: "editor.exe"; accepted => { root.changed(); } }
+                        Button { text: "Apply app rules"; clicked => { root.changed(); } }
+                        Note { text: "Clear a name to return that app to automatic detection. The .exe extension may be omitted; paths and wildcard patterns are not used. Lock-screen hiding is always respected."; }
+
+
+                    } }
                 }
+                Tab { title: "General"; ScrollView { PageLayout {
+
+                        Heading { text: "Windows startup"; }
+                        CheckBox { text: "Start Still Island when I sign in"; enabled: root.startup-available; checked <=> root.launch-at-startup; toggled => { root.changed(); } }
+                        Note { text: root.startup-status; }
+                        Rule {}
+
+                        Heading { text: "Updates"; }
+                        Note { text: root.update-status; }
+                        if !root.update-store: CheckBox { text: "Download updates automatically"; enabled: !root.update-packaged; checked <=> root.auto-update; toggled => { root.auto-update-changed(self.checked); } }
+                        HorizontalLayout {
+                            Button { text: root.update-store ? "Open Microsoft Store" : root.update-packaged ? "View latest release" : "Check for updates"; enabled: !root.update-busy; clicked => { root.check-update(); } }
+                            if root.update-ready: Button { text: "Update and restart"; clicked => { root.install-update(); } }
+                        }
+                        Rectangle { vertical-stretch: 1; background: transparent; }
+
+                    } }
                 }
+
             }
             Rule {}
-            Note { text: root.status-text == "" ? "Saved locally on this PC." : root.status-text; }
+            if root.status-text != "" : Note { text: root.status-text; }
             HorizontalLayout {
                             spacing: 12px;
-                Button { text: "Plugins…"; clicked => { root.manage-plugins(); } }
                 Button { text: "Reset defaults"; clicked => { root.reset-defaults(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Button { text: "Done"; primary: true; clicked => { root.close-settings(); } }

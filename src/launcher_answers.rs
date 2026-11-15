@@ -35,7 +35,38 @@ fn pair(query: &str) -> Option<Pair> {
     if query.len() > 512 {
         return None;
     }
+    // A bare dollar sign means USD; other dollar currencies remain explicit
+    // ISO codes (for example CAD or SGD).
+    let normalized;
+    let query = if let Some((amount, code)) =
+        [('$', "USD"), ('€', "EUR"), ('£', "GBP"), ('₱', "PHP")]
+            .into_iter()
+            .find_map(|(symbol, code)| {
+                query
+                    .trim_start()
+                    .strip_prefix(symbol)
+                    .map(|amount| (amount, code))
+            }) {
+        let amount = amount.trim_start();
+        let split = amount.find(char::is_whitespace).unwrap_or(amount.len());
+        normalized = format!(
+            "{} {code} {}",
+            &amount[..split],
+            amount[split..].trim_start()
+        );
+        normalized.as_str()
+    } else {
+        query
+    };
     let words = query.split_whitespace().collect::<Vec<_>>();
+    if words.len() == 3 && words[0].len() > 3 {
+        let split = words[0].len() - 3;
+        if let (Some(amount), Some(code)) = (words[0].get(..split), words[0].get(split..)) {
+            if number(amount) && code.bytes().all(|c| c.is_ascii_alphabetic()) {
+                return pair(&format!("{amount} {code} {} {}", words[1], words[2]));
+            }
+        }
+    }
     if words.len() != 4
         || !number(words[0])
         || !(words[2].eq_ignore_ascii_case("to") || words[2].eq_ignore_ascii_case("in"))
@@ -59,6 +90,23 @@ pub fn is_incomplete(query: &str) -> bool {
     if q.is_empty() || q.len() > 512 {
         return false;
     }
+    if let Some(rest) = q.strip_prefix(['$', '€', '£', '₱']) {
+        let words: Vec<_> = rest.split_whitespace().collect();
+        if words.is_empty() {
+            return true;
+        }
+        if number(words[0])
+            && (words.len() == 1
+                || (words.len() == 2
+                    && ["to", "in"].contains(&words[1].to_ascii_lowercase().as_str()))
+                || (words.len() == 3
+                    && ["to", "in"].contains(&words[1].to_ascii_lowercase().as_str())
+                    && words[2].len() < 3
+                    && words[2].bytes().all(|c| c.is_ascii_alphabetic())))
+        {
+            return true;
+        }
+    }
     let lower = q.to_ascii_lowercase();
     let mathlike = q.starts_with(|c: char| c.is_ascii_digit() || "+-.(".contains(c))
         || ["sin(", "cos(", "tan(", "sqrt(", "log(", "ln(", "abs("]
@@ -74,6 +122,20 @@ pub fn is_incomplete(query: &str) -> bool {
         }
     });
     let words: Vec<_> = q.split_whitespace().collect();
+    if words.len() == 3
+        && ["to", "in"].contains(&words[1].to_ascii_lowercase().as_str())
+        && words[2].len() < 3
+        && words[0].len() > 3
+    {
+        let split = words[0].len() - 3;
+        if words[0].get(..split).is_some_and(number)
+            && words[0]
+                .get(split..)
+                .is_some_and(|code| code.bytes().all(|c| c.is_ascii_alphabetic()))
+        {
+            return true;
+        }
+    }
     mathlike
         && (q.ends_with(['+', '-', '*', '/', '^', '(', '='])
             || balance > 0
@@ -122,8 +184,10 @@ pub fn classify(query: &str) -> Option<Kind> {
             .strip_prefix(f)
             .is_some_and(|r| r.trim_start().starts_with('('))
     });
-    let numeric = q.chars().any(|c| c.is_ascii_digit())
-        && q.chars()
+    let percent = lower.replace("% of ", "% * ");
+    let numeric = percent.chars().any(|c| c.is_ascii_digit())
+        && percent
+            .chars()
             .all(|c| c.is_ascii_digit() || c.is_whitespace() || "+-*/().^%!×÷−eE".contains(c));
     let units = q.split_whitespace().next().is_some_and(number)
         && (lower.contains(" to ") || lower.contains(" in "));
@@ -141,6 +205,17 @@ impl fend_core::Interrupt for Deadline<'_> {
 }
 fn math(text: &str, cancel: &AtomicBool) -> Result<String, String> {
     let text = text.replace('×', "*").replace('÷', "/").replace('−', "-");
+    let text = if let Some(index) = text.to_ascii_lowercase().find("% of ") {
+        let percent = &text[..index];
+        let expression = &text[index + 5..];
+        if number(percent.trim()) {
+            format!("({} / 100) * ({expression})", percent.trim())
+        } else {
+            text
+        }
+    } else {
+        text
+    };
     let mut context = fend_core::Context::new();
     let result = fend_core::evaluate_with_interrupt(
         &text,
@@ -566,6 +641,11 @@ mod tests {
     #[test]
     fn local_math() {
         let c = AtomicBool::new(false);
+        assert_eq!(evaluate("50% of 240", &c).unwrap().unwrap().value, "120");
+        for query in ["€5 to PHP", "£5 to USD", "₱5 to EUR", "5USD to PHP"] {
+            assert_eq!(classify(query), Some(Kind::Currency));
+        }
+        assert!(is_incomplete("5USD to PH"));
         assert_eq!(evaluate("(50+20)/2", &c).unwrap().unwrap().value, "35");
         assert_eq!(
             evaluate("5 ft to cm", &c).unwrap().unwrap().value,
@@ -584,6 +664,44 @@ mod tests {
             evaluate("100 usd to USD", &c).unwrap().unwrap().value,
             "100 USD"
         );
+    }
+    #[test]
+    fn dollar_amounts_route_to_currency_without_changing_iso_queries() {
+        for query in ["$5 to php", "$ 5 to PHP", " $5 in php ", "5 usd to php"] {
+            assert_eq!(classify(query), Some(Kind::Currency), "{query}");
+            assert_eq!(
+                pair(query),
+                Some(Pair {
+                    amount: "5".into(),
+                    base: "USD".into(),
+                    quote: "PHP".into(),
+                })
+            );
+            assert_eq!(currency_pair_key(query).as_deref(), Some("USD/PHP"));
+        }
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            evaluate("$5 to usd", &cancel).unwrap().unwrap().value,
+            "5 USD"
+        );
+        for query in ["$", "$5", "$5 to", "$5 to p", "$5 to ph"] {
+            assert!(is_incomplete(query), "{query}");
+            assert_eq!(classify(query), None, "{query}");
+            assert_eq!(evaluate(query, &cancel).unwrap(), None);
+        }
+        for query in ["$no to php", "$5 USD to PHP", "$5 to php extra"] {
+            assert_eq!(classify(query), None, "{query}");
+        }
+    }
+    #[test]
+    #[ignore = "requires live exchange-rate service"]
+    fn live_dollar_to_php() {
+        let cancel = AtomicBool::new(false);
+        let p = pair("$5 to php").unwrap();
+        let rate = fetch_rate(&p.base, &p.quote, &cancel, now()).unwrap();
+        assert!(valid_rate(&rate, now()));
+        let value = math(&format!("({}) * ({})", p.amount, rate.rate), &cancel).unwrap();
+        assert!(value.parse::<f64>().unwrap() > 0.);
     }
     #[test]
     fn cache_refresh_and_fallback() {

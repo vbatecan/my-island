@@ -6,6 +6,14 @@ use std::{num::NonZeroU32, time::Instant};
 const MAX_PIXELS: f64 = 1_048_576.;
 const VERTEX: &str = "#version 330 core\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0,1);}";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Optics {
+    Liquid,
+    Acrylic,
+    Glass,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Geometry {
     pub canvas: [f32; 2],
@@ -13,6 +21,8 @@ pub struct Geometry {
     pub scale: f32,
     pub tint: f32,
     pub dark: bool,
+    pub optics: Optics,
+    pub sample_y: f32,
 }
 impl Geometry {
     pub fn new(canvas: [f32; 2], contour: ShapeContour, scale: f32, tint: f32, dark: bool) -> Self {
@@ -27,6 +37,8 @@ impl Geometry {
             scale,
             tint,
             dark,
+            optics: Optics::Liquid,
+            sample_y: 0.,
         }
     }
     fn size(self) -> [i32; 2] {
@@ -42,11 +54,12 @@ impl Geometry {
 pub struct Palette {
     luminance: Option<f32>,
     sampled: Option<Instant>,
+    tint: Option<f32>,
     pub dark: bool,
     pub mixed: bool,
 }
 impl Palette {
-    pub fn sample(&mut self, frame: &Backdrop, region: [f32; 4], now: Instant) {
+    pub fn sample(&mut self, frame: &Backdrop, region: [f32; 4], now: Instant, tint: f32) {
         let [left, top, right, bottom] = region;
         let mut sum = 0.;
         let mut count = 0.;
@@ -56,7 +69,11 @@ impl Palette {
             for x in (left.max(0.) as u32..(right as u32).min(frame.width)).step_by(8) {
                 let i = ((y * frame.width + x) * 4) as usize;
                 if let Some(p) = frame.pixels.get(i..i + 3) {
-                    let l = linear(p[0]) * 0.2126 + linear(p[1]) * 0.7152 + linear(p[2]) * 0.0722;
+                    // Choose text contrast from the tinted surface, not the raw desktop.
+                    let channel =
+                        |v: u8| linear((v as f32 * (1. - tint.clamp(0., 1.))).round() as u8);
+                    let l =
+                        channel(p[0]) * 0.2126 + channel(p[1]) * 0.7152 + channel(p[2]) * 0.0722;
                     sum += l;
                     count += 1.;
                     lo = lo.min(l);
@@ -68,14 +85,18 @@ impl Palette {
             return;
         }
         let measured = sum / count;
-        let weight = self.sampled.map_or(1., |last| {
-            1. - (-now.duration_since(last).as_secs_f32() / 0.15).exp()
-        });
+        let weight = self
+            .sampled
+            .filter(|_| self.tint == Some(tint))
+            .map_or(1., |last| {
+                1. - (-now.duration_since(last).as_secs_f32() / 0.15).exp()
+            });
         let l = self
             .luminance
             .map_or(measured, |old| old + weight * (measured - old));
         self.luminance = Some(l);
         self.sampled = Some(now);
+        self.tint = Some(tint);
         if l < 0.35 {
             self.dark = true;
         } else if l > 0.55 {
@@ -109,11 +130,15 @@ pub struct Renderer {
     pub submission_ms: f64,
 }
 impl Renderer {
-    pub fn invalidate(&mut self) {
-        self.rendered = None;
+    /// Call exclusively from a Slint rendering notifier with its current context.
+    pub unsafe fn for_graphics_api(api: &slint::GraphicsAPI<'_>) -> Result<Self, String> {
+        let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api else {
+            return Err("Native OpenGL is unavailable.".into());
+        };
+        unsafe { Self::new(glow::Context::from_loader_function_cstr(get_proc_address)) }
     }
     /// Call exclusively from a Slint rendering notifier with its current context.
-    pub unsafe fn new(gl: glow::Context) -> Result<Self, String> {
+    unsafe fn new(gl: glow::Context) -> Result<Self, String> {
         unsafe {
             let _state = State::save(&gl);
             let program = gl.create_program()?;
@@ -165,11 +190,11 @@ impl Renderer {
                 "canvas",
                 "target_size",
                 "shape",
-                "edges[0]",
                 "tint",
                 "support",
                 "pass",
-                "unused",
+                "optics",
+                "sample_y",
             ]
             .map(|name| gl.get_uniform_location(program, name));
             // Restore before moving the context into the renderer.
@@ -196,7 +221,6 @@ impl Renderer {
         frame: &Backdrop,
         revision: u64,
         geometry: Geometry,
-        contour: ShapeContour,
         mixed: bool,
     ) -> Result<Option<slint::Image>, String> {
         if self.rendered == Some((revision, geometry, mixed)) {
@@ -221,7 +245,8 @@ impl Renderer {
             gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
             gl.active_texture(glow::TEXTURE0);
             let size = [frame.width as i32, frame.height as i32];
-            if self.source_size != size {
+            let source_resize = self.source_size != size;
+            if source_resize {
                 for i in 0..3 {
                     storage(gl, self.textures[i], size);
                 }
@@ -229,8 +254,12 @@ impl Renderer {
                 self.uploaded = None;
             }
             let output_size = geometry.size();
-            let publish = self.rendered.is_none() || output_size != self.output_size;
-            if output_size != self.output_size {
+            let output_resize = output_size != self.output_size;
+            let changed_optics = self
+                .rendered
+                .is_some_and(|(_, old, _)| old.optics != geometry.optics);
+            let publish = self.rendered.is_none() || output_resize || changed_optics;
+            if output_resize {
                 // Ordered GL commands retain old storage until prior uses finish.
                 for i in 3..4 {
                     storage(gl, self.textures[i], output_size);
@@ -244,11 +273,9 @@ impl Renderer {
                 geometry.canvas[0],
                 geometry.canvas[1],
             );
-            if self.uploaded != Some(revision)
-                || self
-                    .rendered
-                    .is_some_and(|(_, old, _)| old.canvas != geometry.canvas)
-            {
+            gl.uniform_1_i32(self.uniforms[8].as_ref(), geometry.optics as i32);
+            let upload = changed_optics || self.uploaded != Some(revision);
+            if upload {
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[0]));
                 gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -261,21 +288,28 @@ impl Renderer {
                     glow::UNSIGNED_BYTE,
                     glow::PixelUnpackData::Slice(Some(&frame.pixels)),
                 );
-                for (pass, source, destination) in [(1, 0, 1), (2, 1, 2)] {
-                    gl.uniform_1_i32(self.uniforms[8].as_ref(), pass);
-                    self.draw(source, destination, size)?;
-                }
                 self.uploaded = Some(revision);
             }
-            gl.uniform_1_i32(self.uniforms[8].as_ref(), 0);
+            if geometry.optics == Optics::Liquid
+                && (upload
+                    || self
+                        .rendered
+                        .is_some_and(|(_, old, _)| old.canvas != geometry.canvas))
+            {
+                for (pass, source, destination) in [(1, 0, 1), (2, 1, 2)] {
+                    gl.uniform_1_i32(self.uniforms[7].as_ref(), pass);
+                    self.draw(source, destination, size, source_resize)?;
+                }
+            }
+            gl.uniform_1_i32(self.uniforms[7].as_ref(), 0);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[2]));
             gl.active_texture(glow::TEXTURE0);
             gl.uniform_4_f32_slice(self.uniforms[4].as_ref(), &geometry.shape);
-            gl.uniform_4_f32_slice(self.uniforms[5].as_ref(), &contour.shader_edges());
-            gl.uniform_1_f32(self.uniforms[6].as_ref(), geometry.tint);
+            gl.uniform_1_f32(self.uniforms[5].as_ref(), geometry.tint);
+            gl.uniform_1_f32(self.uniforms[9].as_ref(), geometry.sample_y);
             gl.uniform_1_f32(
-                self.uniforms[7].as_ref(),
+                self.uniforms[6].as_ref(),
                 if mixed {
                     if geometry.dark { -1. } else { 1. }
                 } else {
@@ -285,7 +319,7 @@ impl Renderer {
             // Slint and this pass submit on the same context. Command ordering
             // protects earlier reads; replacing the Image every spring tick only
             // invalidates Slint's scene and schedules a redundant second frame.
-            self.draw(0, self.output, output_size)?;
+            self.draw(0, self.output, output_size, output_resize)?;
             self.rendered = Some((revision, geometry, mixed));
             self.submissions += 1;
             self.submission_ms += started.elapsed().as_secs_f64() * 1000.;
@@ -298,7 +332,13 @@ impl Renderer {
             }))
         }
     }
-    unsafe fn draw(&self, source: usize, destination: usize, size: [i32; 2]) -> Result<(), String> {
+    unsafe fn draw(
+        &self,
+        source: usize,
+        destination: usize,
+        size: [i32; 2],
+        resized: bool,
+    ) -> Result<(), String> {
         unsafe {
             let gl = &self.gl;
             gl.bind_texture(glow::TEXTURE_2D, Some(self.textures[source]));
@@ -309,7 +349,9 @@ impl Renderer {
                 Some(self.textures[destination]),
                 0,
             );
-            if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+            if resized
+                && gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE
+            {
                 return Err("Incomplete Liquid Glass framebuffer".into());
             }
             gl.viewport(0, 0, size[0], size[1]);
@@ -501,13 +543,14 @@ mod tests {
         }
         let mut p = Palette::default();
         let now = Instant::now();
-        p.sample(&f, [16., 8., 48., 24.], now);
+        p.sample(&f, [16., 8., 48., 24.], now, 0.);
         assert!(p.dark);
         f.pixels = [180, 180, 180, 255].repeat(64 * 32);
         p.sample(
             &f,
             [0., 0., 64., 32.],
             now + std::time::Duration::from_secs(1),
+            0.,
         );
         assert!(p.dark);
         f.pixels.fill(255);
@@ -515,8 +558,23 @@ mod tests {
             &f,
             [0., 0., 64., 32.],
             now + std::time::Duration::from_secs(2),
+            0.,
         );
         assert!(!p.dark);
+    }
+    #[test]
+    fn black_tint_selects_light_text_even_over_a_white_desktop() {
+        let f = Backdrop {
+            width: 64,
+            height: 32,
+            pixels: [255, 255, 255, 255].repeat(64 * 32),
+        };
+        let mut palette = Palette::default();
+        let now = Instant::now();
+        palette.sample(&f, [0., 0., 64., 32.], now, 0.);
+        assert!(!palette.dark);
+        palette.sample(&f, [0., 0., 64., 32.], now, 0.55);
+        assert!(palette.dark);
     }
     #[test]
     fn srgb_reference_values() {

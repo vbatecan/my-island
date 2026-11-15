@@ -11,6 +11,7 @@ export { LauncherResult } from "components/app-launcher.slint";
 import { AppLauncher, LauncherResult } from "components/app-launcher.slint";
 
 export component IslandWindow inherits Window {
+    in property <bool> downloads-preview;
     title: "Still Island";
     width: root.canvas-width * root.scaled-pixel;
     height: root.canvas-height * root.scaled-pixel;
@@ -22,6 +23,8 @@ export component IslandWindow inherits Window {
     out property <bool> lyrics-gap-active: synced-lines.gap-active;
     in property <bool> answer-editing;
     in property <bool> answer-visible;
+    in property <bool> answer-action: false;
+    in property <bool> answer-slow: false;
     in property <string> answer-value;
     in property <string> answer-detail;
     in property <bool> answer-busy;
@@ -30,13 +33,29 @@ export component IslandWindow inherits Window {
     in property <[LauncherResult]> launcher-results;
     in-out property <string> launcher-text;
     in property <string> launcher-status;
+    in property <bool> launcher-command-mode: false;
+    in property <bool> launcher-file-mode: false;
+    in property <string> launcher-file-status;
     in property <bool> launcher-busy: false;
     in property <int> launcher-selected: 0;
+    in-out property <[string]> launcher-action-items;
+    in-out property <string> launcher-action-title;
+    in-out property <string> launcher-action-status;
+    in-out property <int> launcher-action-selected: 0;
+    in-out property <bool> launcher-actions-open: false;
+    in-out property <bool> launcher-shortcut-open: false;
+    in-out property <bool> launcher-shortcut-editing: false;
+    in-out property <string> launcher-shortcut-alias;
+    in-out property <string> launcher-shortcut-target;
     callback launcher-query(string);
     callback launcher-activate(int);
     callback launcher-navigate(int);
     callback launcher-dismiss();
     callback launcher-updated();
+    callback launcher-toggle-actions(int);
+    callback launcher-action-navigate(int);
+    callback launcher-action-activate(int);
+    callback launcher-save-shortcut(string, string);
     public function launcher-focus() { app-search.focus-search(); }
     in property <string> page-label;
     in property <int> page-count: 0;
@@ -213,6 +232,8 @@ export component IslandWindow inherits Window {
     animate liquid-rim { duration: root.media-motion-enabled ? 120ms / root.animation-speed : 0ms; }
     in property <image> glass-texture;
     in property <bool> has-glass-texture: false;
+    in property <bool> timer-alert: false;
+    in property <bool> gpu-material: false;
 
     in property <bool> notification-mode: false;
     in property <bool> notification-compact: false;
@@ -226,7 +247,7 @@ export component IslandWindow inherits Window {
     in property <int> pending-count: 0;
     in property <bool> compact-media: false;
     in property <bool> volume-feedback: false;
-    private property <float> header-content-width: root.wide-media ? max(24, root.media-column-width - (root.volume-feedback ? 208 : root.pending-count > 0 ? 129 : 102)) : root.volume-feedback ? 104 : root.pending-count > 0 ? 183 : 210;
+    private property <float> header-content-width: root.wide-media ? max(24, root.media-column-width - (root.timer-alert ? 230 : root.volume-feedback ? 208 : root.pending-count > 0 ? 129 : 102)) : root.timer-alert ? 82 : root.volume-feedback ? 104 : root.pending-count > 0 ? 183 : 210;
     in property <bool> pinned: false;
     callback toggle-pin();
     in property <bool> timer-mode: false;
@@ -288,6 +309,7 @@ export component IslandWindow inherits Window {
     in property <float> plugin-view-height: 104;
     in property <bool> plugin-view-open: false;
     callback open-plugins(); callback manage-plugins(); callback plugin-home();
+    callback update-finished();
     callback plugin-select(string); callback plugin-action(string,string,string);
     callback plugin-edit(); callback plugins-updated();
     callback plugin-visibility(bool);
@@ -297,6 +319,7 @@ export component IslandWindow inherits Window {
     canvas := Rectangle {
         x: 0px; y: 0px; width: root.canvas-width * root.scaled-pixel; height: root.canvas-height * root.scaled-pixel;
     keyboard := FocusScope {
+        focus-on-tab-navigation: !root.app-launcher-mode;
         key-pressed(event) => {
             if event.text == Key.Escape { root.escape(); return accept; }
             return reject;
@@ -310,9 +333,9 @@ export component IslandWindow inherits Window {
         // Shape rendering includes the concave shoulders. Contents stay in the
         // central body, where a normal rectangle clip is sufficient.
         if (root.appearance == 2 || root.appearance == 3 || root.appearance == 5) && root.has-glass-texture : Image {
-            x: root.appearance == 5 ? (parent.width - root.canvas-width * root.scaled-pixel) / 2 : -root.shoulder * root.scaled-pixel; y: 0px;
-            width: root.appearance == 5 ? root.canvas-width * root.scaled-pixel : parent.width + 2 * root.shoulder * root.scaled-pixel;
-            height: root.appearance == 5 ? root.canvas-height * root.scaled-pixel : parent.height;
+            x: root.gpu-material ? (parent.width - root.canvas-width * root.scaled-pixel) / 2 : -root.shoulder * root.scaled-pixel; y: 0px;
+            width: root.gpu-material ? root.canvas-width * root.scaled-pixel : parent.width + 2 * root.shoulder * root.scaled-pixel;
+            height: root.gpu-material ? root.canvas-height * root.scaled-pixel : parent.height;
             source: root.glass-texture; image-fit: fill;
         }
         Path {
@@ -439,7 +462,8 @@ export component IslandWindow inherits Window {
                     width: max(184 * root.scaled-pixel, parent.width - 36 * root.scaled-pixel);
                     height: min(parent.height - 6 * root.scaled-pixel, 30 * root.font-pixel); opacity: root.compact-reveal;
                     Rectangle { x: 0px; y: (parent.height - self.height) / 2; width: 27 * root.scaled-pixel; height: 27 * root.scaled-pixel; border-radius: 7 * root.scaled-pixel; background: (root.light-material ? #0000000a : #ffffff0a);
-                        for tile in [0,1,2,3] : Rectangle { x: (7 + mod(tile,2) * 8) * root.scaled-pixel; y: (7 + floor(tile / 2) * 8) * root.scaled-pixel; width: 5 * root.scaled-pixel; height: 5 * root.scaled-pixel; border-radius: root.scaled-pixel; background: tile == 0 ? root.plugin-accent : #d7d7df; }
+                        for tile in [0,1,2,3] : Rectangle { visible: !root.downloads-preview; x: (7 + mod(tile,2) * 8) * root.scaled-pixel; y: (7 + floor(tile / 2) * 8) * root.scaled-pixel; width: 5 * root.scaled-pixel; height: 5 * root.scaled-pixel; border-radius: root.scaled-pixel; background: tile == 0 ? root.plugin-accent : #d7d7df; }
+                        if root.downloads-preview : Glyph { light-material: root.light-material; ui-scale: root.ui-scale; text: "\u{e8b7}"; }
                     }
                     Text { x: 36 * root.scaled-pixel; y: 0px; width: max(0px, parent.width - 36 * root.scaled-pixel); text: root.plugin-title; color: (root.light-material ? #202024 : white); font-size: 11 * root.font-pixel; font-weight: 600; height: 15 * root.font-pixel; overflow: elide; }
                     Text { x: 36 * root.scaled-pixel; y: 15 * root.font-pixel; width: max(0px, parent.width - 36 * root.scaled-pixel); text: root.plugin-body; color: (root.light-material ? #4b4b54 : #aaaab5); font-size: 9 * root.font-pixel; height: 12 * root.font-pixel; overflow: elide; }
@@ -453,7 +477,7 @@ export component IslandWindow inherits Window {
                     Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (3 * root.scaled-pixel); width: (28 * root.scaled-pixel); height: (24 * root.scaled-pixel); font-size: (21 * root.scaled-pixel); text: "\u{e916}"; color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : #e1e1e8); }
                     Text { visible: root.timer-finished; opacity: 1 - root.timer-roll; x: (39 * root.scaled-pixel); y: -root.scaled-pixel; width: (110 * root.scaled-pixel); height: (19 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (14 * root.font-pixel); font-weight: 600; text: "Time is up"; }
                     RollingTime { light-material: root.light-material; digits: root.timer-digits; roll: root.timer-roll; visible: !root.timer-finished || root.timer-roll > 0.001; x: (39 * root.scaled-pixel); y: -root.scaled-pixel; width: (110 * root.scaled-pixel); height: (19 * root.scaled-pixel); ink: (root.light-material ? #202024 : white); font-size: (14 * root.font-pixel);   }
-                    Text { x: (40 * root.scaled-pixel); y: (19 * root.scaled-pixel); width: (106 * root.scaled-pixel); height: (11 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (9 * root.font-pixel); text: root.timer-finished ? "Timer complete" : root.timer-running ? "Counting down" : "Paused"; }
+                    Text { x: (40 * root.scaled-pixel); y: (19 * root.scaled-pixel); width: (106 * root.scaled-pixel); height: (11 * root.scaled-pixel); color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (9 * root.font-pixel); text: root.timer-finished ? "" : root.timer-running ? "Counting down" : "Paused"; }
                     TouchArea { x: 0px; y: 0px; width: (148 * root.scaled-pixel); height: (30 * root.scaled-pixel); changed pressed => { root.pointer-interaction(self.pressed); } clicked => { root.open-timer(); } }
                     QuietButton { light-material: root.light-material; ui-scale: root.ui-scale; x: (154 * root.scaled-pixel); y: root.scaled-pixel; width: (30 * root.scaled-pixel); height: (28 * root.scaled-pixel); glyph: root.timer-running ? "\u{e769}" : "\u{e768}"; label: root.timer-running ? "Pause countdown" : "Resume countdown"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-toggle(); } }
                 }
@@ -467,17 +491,33 @@ export component IslandWindow inherits Window {
                     opacity: root.reveal;
                     font-pixel: root.font-pixel;
                     layout-pixel: root.scaled-pixel;
-                    answer-editing: root.answer-editing; answer-visible: root.answer-visible; answer-value: root.answer-value; answer-detail: root.answer-detail; answer-busy: root.answer-busy; answer-error: root.answer-error;
+                    answer-editing: root.answer-editing; answer-visible: root.answer-visible; answer-action: root.answer-action; answer-slow: root.answer-slow; answer-value: root.answer-value; answer-detail: root.answer-detail; answer-busy: root.answer-busy; answer-error: root.answer-error;
                     animations-enabled: root.media-motion-enabled; animation-speed: root.animation-speed;
                     results: root.launcher-results;
                     query <=> root.launcher-text;
                     busy: root.launcher-busy;
                     status-text: root.launcher-status;
+                    command-mode: root.launcher-command-mode;
+                    file-mode: root.launcher-file-mode;
+                    file-status: root.launcher-file-status;
                     selected-index: root.launcher-selected;
+                    action-items: root.launcher-action-items;
+                    action-title: root.launcher-action-title;
+                    action-status: root.launcher-action-status;
+                    action-selected: root.launcher-action-selected;
+                    actions-open: root.launcher-actions-open;
+                    shortcut-open: root.launcher-shortcut-open;
+                    shortcut-editing: root.launcher-shortcut-editing;
+                    shortcut-alias <=> root.launcher-shortcut-alias;
+                    shortcut-target <=> root.launcher-shortcut-target;
                     query-edited(value) => { root.launcher-query(value); }
                     activate(index) => { root.launcher-activate(index); }
                     navigate(delta) => { root.launcher-navigate(delta); }
                     dismiss => { root.launcher-dismiss(); }
+                    toggle-actions(index) => { root.launcher-toggle-actions(index); }
+                    action-navigate(delta) => { root.launcher-action-navigate(delta); }
+                    action-activate(index) => { root.launcher-action-activate(index); }
+                    save-shortcut(alias, target) => { root.launcher-save-shortcut(alias, target); }
                 }
                 expanded-content := Rectangle {
                     x: (parent.width - self.width) / 2;
@@ -490,7 +530,7 @@ export component IslandWindow inherits Window {
                         x: root.wide-media ? root.media-column-x * root.scaled-pixel : 0px; y: root.scaled-pixel; width: max(0, root.header-content-width - (root.media-mode ? 18 : 0)) * root.scaled-pixel; height: (20 * root.scaled-pixel);
                         color: (root.light-material ? #4b4b54 : #b8b8c0); font-size: (10 * root.font-pixel); font-weight: 600; letter-spacing: root.scaled-pixel;
                         overflow: elide;
-                        text: root.notification-mode ? root.notification-app : root.battery-mode ? "BATTERY" : root.timer-finished ? "COUNTDOWN" : root.plugin-mode && !root.plugin-view-open ? "INTEGRATIONS" : root.page-count > 1 && root.page-label != "" ? (root.media-mode ? root.player-label : root.page-label) + " · " + (root.page-index + 1) + "/" + root.page-count + "  ↕" : root.plugin-mode ? root.plugin-title : root.timer-mode ? "COUNTDOWN" : root.media-mode ? root.player-label : root.volume-mode ? "SYSTEM AUDIO" : "STILL";
+                        text: root.notification-mode ? root.notification-app : root.battery-mode ? "BATTERY" : root.timer-mode && root.timer-finished ? "COUNTDOWN" : root.plugin-mode && !root.plugin-view-open ? "INTEGRATIONS" : root.page-count > 1 && root.page-label != "" ? (root.media-mode ? root.player-label : root.page-label) + " · " + (root.page-index + 1) + "/" + root.page-count + "  ↕" : root.plugin-mode ? root.plugin-title : root.timer-mode ? "COUNTDOWN" : root.media-mode ? root.player-label : root.volume-mode ? "SYSTEM AUDIO" : "STILL";
                     }
                     if !root.media-mode && !root.volume-mode && !root.notification-mode && !root.timer-mode && !root.battery-mode && !root.plugin-mode : Rectangle {
                         x: root.battery-present ? (216 * root.scaled-pixel) : (186 * root.scaled-pixel); y: (105 * root.scaled-pixel); width: root.battery-present ? (96 * root.scaled-pixel) : (126 * root.scaled-pixel); height: (22 * root.scaled-pixel); border-radius: (5 * root.scaled-pixel);
@@ -524,12 +564,18 @@ export component IslandWindow inherits Window {
                         changed pressed => { root.pointer-interaction(self.pressed); }
                         clicked => { root.player-picker-open = !root.player-picker-open; }
                     }
-                    if root.volume-feedback : Rectangle {
+                    if root.timer-alert && !root.timer-mode : TextButton {
+                        light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale;
+                        x: parent.width - 200 * root.scaled-pixel; y: -2 * root.scaled-pixel;
+                        width: 100 * root.scaled-pixel; height: 23 * root.scaled-pixel;
+                        label: "Time is up"; clicked => { root.open-timer(); }
+                    }
+                    if root.volume-feedback && !root.timer-alert : Rectangle {
                         x: parent.width - (180 * root.scaled-pixel); y: -(2 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (23 * root.scaled-pixel); border-radius: (11 * root.scaled-pixel); background: (root.light-material ? #f0f0f4 : #333338);
                         Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (7 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (16 * root.scaled-pixel); height: (17 * root.scaled-pixel); font-size: (11 * root.scaled-pixel); text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
                         Text { x: (28 * root.scaled-pixel); y: (3 * root.scaled-pixel); width: (42 * root.scaled-pixel); height: (17 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (10 * root.font-pixel); text: root.volume-muted ? "Muted" : root.volume + "%"; }
                     }
-                    if root.pending-count > 0 && !root.notification-mode : Rectangle {
+                    if root.pending-count > 0 && !root.notification-mode && !root.timer-alert : Rectangle {
                         x: parent.width - (122 * root.scaled-pixel); y: 0px; width: (19 * root.scaled-pixel); height: (17 * root.scaled-pixel); border-radius: (8 * root.scaled-pixel); background: (root.light-material ? #00000020 : #ffffff20);
                         visible: !root.volume-feedback;
                         Text { text: root.pending-count > 9 ? "9+" : root.pending-count; color: (root.light-material ? #202024 : white); font-size: (9 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
@@ -681,11 +727,11 @@ export component IslandWindow inherits Window {
                     if root.timer-mode && !root.notification-mode && !root.battery-mode && !root.plugin-mode : Rectangle {
                         x: 0px; y: (28 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (116 * root.scaled-pixel);
                         private property <length> heading-height: max(37, 39 * root.text-scale) * root.scaled-pixel;
-                        Text { visible: root.timer-finished; opacity: 1 - root.timer-roll; x: 0px; y: 0px; width: (176 * root.scaled-pixel); height: parent.heading-height; overflow: elide; text: "Time is up"; color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : white); font-size: root.timer-finished ? (26 * root.font-pixel) : (31 * root.font-pixel); font-weight: 600; }
+                        Text { visible: root.timer-finished; opacity: 1 - root.timer-roll; x: 0px; y: 0px; width: (312 * root.scaled-pixel); height: parent.heading-height; overflow: elide; text: "Time is up"; color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : white); font-size: root.timer-finished ? (26 * root.font-pixel) : (31 * root.font-pixel); font-weight: 600; }
                         RollingTime { light-material: root.light-material; digits: root.timer-digits; roll: root.timer-roll; visible: !root.timer-finished || root.timer-roll > 0.001; x: 0px; y: 0px; width: (176 * root.scaled-pixel); height: parent.heading-height;   ink: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : white); font-size: root.timer-finished ? (26 * root.font-pixel) : (31 * root.font-pixel);  }
-                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (184 * root.scaled-pixel); y: (5 * root.scaled-pixel); width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "−"; enabled: !root.timer-running && root.timer-draft-minutes > 1; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes - 1); } }
-                        Text { x: (210 * root.scaled-pixel); y: (6 * root.scaled-pixel); width: (76 * root.scaled-pixel); height: (23 * root.scaled-pixel); text: root.timer-draft-minutes + " min"; color: (root.light-material ? #4b4b54 : #c3c3cc); font-size: (11 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
-                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (287 * root.scaled-pixel); y: (5 * root.scaled-pixel); width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "+"; enabled: !root.timer-running && root.timer-draft-minutes < 1440; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes + 1); } }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (184 * root.scaled-pixel); y: root.timer-finished ? parent.heading-height + 8 * root.scaled-pixel : 5 * root.scaled-pixel; width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "−"; enabled: !root.timer-running && root.timer-draft-minutes > 1; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes - 1); } }
+                        Text { x: (210 * root.scaled-pixel); y: root.timer-finished ? parent.heading-height + 9 * root.scaled-pixel : 6 * root.scaled-pixel; width: (76 * root.scaled-pixel); height: (23 * root.scaled-pixel); text: root.timer-draft-minutes + " min"; color: (root.light-material ? #4b4b54 : #c3c3cc); font-size: (11 * root.font-pixel); horizontal-alignment: center; vertical-alignment: center; }
+                        TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (287 * root.scaled-pixel); y: root.timer-finished ? parent.heading-height + 8 * root.scaled-pixel : 5 * root.scaled-pixel; width: (25 * root.scaled-pixel); height: (24 * root.scaled-pixel); label: "+"; enabled: !root.timer-running && root.timer-draft-minutes < 1440; interaction(down) => { root.pointer-interaction(down); } clicked => { root.configure-timer(root.timer-draft-minutes + 1); } }
                         ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: parent.heading-height + 2 * root.scaled-pixel; width: (312 * root.scaled-pixel); height: (2 * root.scaled-pixel); value: root.timer-progress; track-color: (root.light-material ? #00000020 : #ffffff20); fill-color: root.timer-finished ? (root.light-material ? #76520e : #f1d795) : (root.light-material ? #202024 : #d5d5df); }
                         for minutes[index] in [1, 5, 15] : TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale;
                             x: index * (59 * root.scaled-pixel); y: parent.heading-height + 10 * root.scaled-pixel; width: (52 * root.scaled-pixel); height: (20 * root.scaled-pixel);
@@ -693,7 +739,7 @@ export component IslandWindow inherits Window {
                             interaction(down) => { root.pointer-interaction(down); }
                             clicked => { root.configure-timer(minutes); }
                         }
-                        Text { x: (182 * root.scaled-pixel); y: parent.heading-height + 10 * root.scaled-pixel; width: (130 * root.scaled-pixel); height: (18 * root.scaled-pixel); text: root.timer-running ? "Counting down" : root.timer-finished ? "Timer complete" : root.timer-paused ? "Paused" : "Ready when you are"; color: (root.light-material ? #4b4b54 : #9999a7); font-size: (10 * root.font-pixel); horizontal-alignment: right; }
+                        Text { visible: !root.timer-finished; x: (182 * root.scaled-pixel); y: parent.heading-height + 10 * root.scaled-pixel; width: (130 * root.scaled-pixel); height: (18 * root.scaled-pixel); text: root.timer-running ? "Counting down" : root.timer-finished ? "Timer complete" : root.timer-paused ? "Paused" : "Ready when you are"; color: (root.light-material ? #4b4b54 : #9999a7); font-size: (10 * root.font-pixel); horizontal-alignment: right; }
                         TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: 0px; y: parent.heading-height + 34 * root.scaled-pixel; width: (150 * root.scaled-pixel); height: (27 * root.scaled-pixel); label: root.timer-running ? "Pause" : root.timer-finished ? "Restart" : root.timer-paused ? "Resume" : "Start"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-toggle(); } }
                         TextButton { light-material: root.light-material; ui-scale: root.ui-scale; text-scale: root.text-scale; x: (162 * root.scaled-pixel); y: parent.heading-height + 34 * root.scaled-pixel; width: (150 * root.scaled-pixel); height: (27 * root.scaled-pixel); label: "Reset"; interaction(down) => { root.pointer-interaction(down); } clicked => { root.timer-reset(); } }
                     }

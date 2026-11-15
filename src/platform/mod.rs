@@ -7,6 +7,7 @@ pub use display::{MonitorInfo, monitors};
 
 pub mod capture;
 pub mod file_dialog;
+pub mod file_search;
 pub mod launcher;
 pub mod power;
 pub mod startup;

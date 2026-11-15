@@ -28,7 +28,7 @@ fn dimensions(ui: &IslandWindow, width: f32, height: f32, label: &str) {
 }
 
 fn settings_tab(app: &Rc<RefCell<App>>, index: i32) {
-    let Some(settings) = app.borrow().preferences.upgrade() else {
+    let Some(settings) = app.borrow().preferences() else {
         check(false, "settings window exists");
         return;
     };
@@ -234,10 +234,17 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                         (ui.get_animation_speed() - 2.).abs() < 0.01,
                         "two hundred percent motion setting reaches the UI",
                     );
+                    check(
+                        app.borrow().preferences().is_none(),
+                        "Settings is lazy before opening",
+                    );
                     show_preferences(&app);
                 }
                 7..=10 => settings_tab(&app, (step - 7) as i32),
                 11 => {
+                    close_preferences(&app, true);
+                    show_preferences(&app);
+                    check(app.borrow().settings_visible, "Settings reopens");
                     close_preferences(&app, true);
                     transition(&app, IslandState::Idle);
                 }

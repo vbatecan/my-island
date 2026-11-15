@@ -29,6 +29,13 @@ const BACKDROP_REFRESH: u32 = WM_APP + 33;
 const DESKTOP_POLICY: u32 = WM_APP + 34;
 const CLOSE_PANEL: u32 = WM_APP + 35;
 const EDGE_HOVER: u32 = WM_APP + 36;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SurfaceState {
+    #[default]
+    Ordinary,
+    Maximized,
+    Fullscreen,
+}
 const HOTKEY: i32 = 0x5354;
 const LAUNCHER_HOTKEY: i32 = 0x5360;
 const SUBCLASS: usize = 0x4f524249;
@@ -47,7 +54,13 @@ pub enum Event {
     HotkeyToggle,
     LauncherToggle,
     EdgeHover(bool),
-    DesktopPolicyChanged { covered: bool, locked: bool },
+    KeepVisible,
+    HoverProbe,
+    DesktopPolicyChanged {
+        covered: bool,
+        locked: bool,
+        surface: SurfaceState,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +93,15 @@ impl Default for Shape {
 }
 #[derive(Default)]
 struct Native {
+    scoped_hover: bool,
+    surface: SurfaceState,
+    keep_visible: bool,
+    hover_enabled: bool,
+    hover_width: f64,
+    slide: f64,
+    probe_pending: bool,
+    placement: Option<(i32, i32, i32, i32, bool)>,
+    region_pixels: Vec<(i32, i32)>,
     hwnd: HWND,
     power: Option<super::power::PowerNotifications>,
     icon: HICON,
@@ -88,6 +110,7 @@ struct Native {
     handler: Option<Rc<dyn Fn(Event)>>,
     taskbar_created: u32,
     hooks: Vec<HWINEVENTHOOK>,
+    snapshot_backdrop: bool,
     refresh_pending: bool,
     reposition_pending: bool,
     policy_pending: bool,
@@ -228,6 +251,7 @@ pub fn update_shape(
     ui_scale: f64,
     canvas_width: f64,
     canvas_height: f64,
+    slide: f64,
 ) {
     let ui_scale = super::display::user_scale(ui_scale);
     let canvas_width = super::display::canvas_extent(canvas_width, crate::state::OVERLAY_WIDTH);
@@ -237,9 +261,11 @@ pub fn update_shape(
     } else {
         offset
     };
-    let previous = NATIVE.with(|n| {
+    let (previous, slide_changed) = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
         let old = n.shape;
+        let changed = n.slide != slide;
+        n.slide = slide;
         n.shape = Shape {
             width,
             height,
@@ -251,9 +277,10 @@ pub fn update_shape(
             canvas_width,
             canvas_height,
         };
-        old
+        (old, changed)
     });
-    if previous.offset != offset
+    if slide_changed
+        || previous.offset != offset
         || previous.topmost != topmost
         || previous.form != form
         || previous.ui_scale != ui_scale
@@ -273,6 +300,7 @@ pub fn configure_desktop(
     outside_click_collapse: bool,
     shortcut_enabled: bool,
 ) -> Result<(), String> {
+    super::display::invalidate();
     let (hwnd, was_enabled) = NATIVE.with(|n| {
         let n = n.borrow();
         (n.hwnd, n.shortcut_enabled)
@@ -426,7 +454,8 @@ fn refresh_input_hooks() -> Result<(), String> {
         let n = n.borrow();
         (
             !n.locked
-                && (n.desktop_covered
+                && (n.hover_enabled
+                    || n.desktop_covered
                     || (n.panel_open
                         && (n.outside_click_collapse || n.keyboard_mode)
                         && !n.hidden)),
@@ -464,6 +493,13 @@ unsafe extern "system" fn mouse_input(code: i32, w: WPARAM, l: LPARAM) -> LRESUL
     // SAFETY: Windows supplies MSLLHOOKSTRUCT only for nonnegative hook codes.
     unsafe {
         if code >= 0 && w.0 as u32 == WM_MOUSEMOVE {
+            NATIVE.with(|n| {
+                let mut n = n.borrow_mut();
+                if n.hover_enabled && !n.probe_pending {
+                    n.probe_pending = true;
+                    let _ = PostMessageW(Some(n.hwnd), EDGE_HOVER, WPARAM(2), LPARAM(0));
+                }
+            });
             let point = (*(l.0 as *const MSLLHOOKSTRUCT)).pt;
             let edge = NATIVE.with(|n| {
                 let mut n = n.borrow_mut();
@@ -498,6 +534,57 @@ unsafe extern "system" fn mouse_input(code: i32, w: WPARAM, l: LPARAM) -> LRESUL
         CallNextHookEx(None, code, w, l)
     }
 }
+pub fn configure_hover_hide(enabled: bool, width: f64) -> Result<(), String> {
+    NATIVE.with(|n| {
+        let mut n = n.borrow_mut();
+        n.hover_enabled = enabled;
+        n.hover_width = width;
+    });
+    refresh_input_hooks()
+}
+pub fn configure_hover_scope(scoped: bool, keep_visible: bool) {
+    let changed = NATIVE.with(|n| {
+        let mut n = n.borrow_mut();
+        n.keep_visible = keep_visible;
+        let changed = n.scoped_hover != scoped;
+        n.scoped_hover = scoped;
+        changed
+    });
+    if changed {
+        queue_policy();
+    }
+}
+
+/// (edge strip, protected travel area, any pointer button held).
+pub fn hover_probe() -> Option<(bool, bool, bool)> {
+    let (id, shape, width) = NATIVE.with(|n| {
+        let n = n.borrow();
+        (n.monitor_id.clone(), n.shape, n.hover_width)
+    });
+    let (monitor, info) = super::display::selected(&id)?;
+    let scale = super::display::scale(monitor) * shape.ui_scale;
+    unsafe {
+        let mut point = POINT::default();
+        GetCursorPos(&mut point).ok()?;
+        let center = (info.rcMonitor.left + info.rcMonitor.right) as f64 / 2.;
+        let in_width = (point.x as f64 - center).abs() <= width * scale / 2.;
+        let edge = in_width && at_top_edge(point, info.rcMonitor);
+        let visit_width = ShapeContour::new(shape.width, shape.height, shape.radius, shape.form)
+            .total_width()
+            .max(width);
+        let visit = (point.x as f64 - center).abs() <= visit_width * scale / 2.
+            && point.y >= info.rcMonitor.top
+            && point.y as f64
+                <= info.rcMonitor.top as f64
+                    + shape.offset * super::display::scale(monitor)
+                    + shape.height * scale;
+        let pressed = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2]
+            .iter()
+            .any(|key| GetAsyncKeyState(key.0 as i32) < 0);
+        Some((edge, visit, pressed))
+    }
+}
+
 fn at_top_edge(point: POINT, bounds: RECT) -> bool {
     bounds.right > bounds.left
         && bounds.bottom > bounds.top
@@ -630,7 +717,12 @@ fn refresh_desktop_policy() {
         set_overlay_visible(false);
     }
     let _ = was_hidden;
-    emit(Event::DesktopPolicyChanged { covered, locked });
+    let surface = NATIVE.with(|n| n.borrow().surface);
+    emit(Event::DesktopPolicyChanged {
+        covered,
+        locked,
+        surface,
+    });
 }
 
 /// Actual visibility is independent of fullscreen policy during event previews.
@@ -750,6 +842,8 @@ fn intersects_monitor(surface: RECT, monitor: RECT) -> bool {
 }
 
 struct FullscreenQuery {
+    surface: SurfaceState,
+    scoped: bool,
     overlay: HWND,
     monitor: RECT,
     monitor_handle: HMONITOR,
@@ -819,18 +913,15 @@ unsafe extern "system" fn fullscreen_candidate(candidate: HWND, data: LPARAM) ->
             )
         {
             query.matched_override = Some(value);
-            query.covered = value;
-            return BOOL(0);
-        }
-        if !query.automatic {
-            return BOOL(continue_search as i32);
         }
         // A maximized app owns the usable display even with a visible taskbar.
         // Per-app overrides above still take precedence.
         if IsZoomed(candidate).as_bool()
+            && GetWindowLongPtrW(candidate, GWL_STYLE) as u32 & WS_CAPTION.0 != 0
             && MonitorFromWindow(candidate, MONITOR_DEFAULTTONULL) == query.monitor_handle
         {
-            query.covered = true;
+            query.surface = SurfaceState::Maximized;
+            query.covered = query.automatic && !query.scoped;
             return BOOL(0);
         }
         if !covers_monitor(outer, query.monitor) {
@@ -856,7 +947,8 @@ unsafe extern "system" fn fullscreen_candidate(candidate: HWND, data: LPARAM) ->
             bottom: origin.y + client.bottom - client.top,
         };
         if covers_monitor(client, query.monitor) {
-            query.covered = true;
+            query.surface = SurfaceState::Fullscreen;
+            query.covered = query.automatic || query.scoped;
             return BOOL(0);
         }
         BOOL(continue_search as i32)
@@ -880,6 +972,8 @@ unsafe fn monitor_has_fullscreen(
             && !foreground.is_invalid()
             && MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL) == monitor;
         let mut query = FullscreenQuery {
+            surface: SurfaceState::Ordinary,
+            scoped: NATIVE.with(|n| n.borrow().scoped_hover),
             overlay,
             monitor: bounds,
             monitor_handle: monitor,
@@ -896,15 +990,21 @@ unsafe fn monitor_has_fullscreen(
             Some(fullscreen_candidate),
             LPARAM(&mut query as *mut _ as isize),
         );
+        NATIVE.with(|n| n.borrow_mut().surface = query.surface);
         query.matched_override.unwrap_or_else(|| {
             query.covered
-                || (query.automatic
+                || ((query.automatic || query.scoped)
                     && foreground_on_monitor
                     && GetWindowLongPtrW(foreground, GWL_STYLE) as u32
                         & (WS_CAPTION.0 | WS_THICKFRAME.0)
                         == 0
                     && SHQueryUserNotificationState().is_ok_and(|state| {
-                        state == QUNS_PRESENTATION_MODE || state == QUNS_RUNNING_D3D_FULL_SCREEN
+                        let fullscreen = state == QUNS_PRESENTATION_MODE
+                            || state == QUNS_RUNNING_D3D_FULL_SCREEN;
+                        if fullscreen {
+                            NATIVE.with(|n| n.borrow_mut().surface = SurfaceState::Fullscreen);
+                        }
+                        fullscreen
                     }))
         })
     }
@@ -1012,25 +1112,45 @@ fn position() {
         );
         let x = info.rcMonitor.left + (info.rcMonitor.right - info.rcMonitor.left - width) / 2;
         let y = info.rcMonitor.top
+            + (NATIVE.with(|n| n.borrow().slide) * dpi_scale * shape.ui_scale).round() as i32
             + (if shape.form == FormFactor::Notch {
                 0.
             } else {
                 shape.offset
             } * dpi_scale)
                 .round() as i32;
-        let _ = SetWindowPos(
-            hwnd,
-            Some(if shape.topmost {
-                HWND_TOPMOST
-            } else {
-                HWND_NOTOPMOST
-            }),
-            x,
-            y,
-            width,
-            height,
-            SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
+        let placement = (x, y, width, height, shape.topmost);
+        let previous = NATIVE.with(|n| n.borrow().placement);
+        if previous != Some(placement) {
+            let mut flags = SWP_NOACTIVATE;
+            if let Some((old_x, old_y, old_width, old_height, old_topmost)) = previous {
+                if (old_x, old_y) == (x, y) {
+                    flags |= SWP_NOMOVE;
+                }
+                if (old_width, old_height) == (width, height) {
+                    flags |= SWP_NOSIZE;
+                }
+                if old_topmost == shape.topmost {
+                    flags |= SWP_NOZORDER;
+                }
+            }
+            let result = SetWindowPos(
+                hwnd,
+                Some(if shape.topmost {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                }),
+                x,
+                y,
+                width,
+                height,
+                flags,
+            );
+            if result.is_ok() {
+                NATIVE.with(|n| n.borrow_mut().placement = Some(placement));
+            }
+        }
     }
     region();
 }
@@ -1069,12 +1189,41 @@ fn region() {
                 }
             })
             .collect();
+        let monitor_id = NATIVE.with(|n| n.borrow().monitor_id.clone());
+        let mut key: Vec<_> = points.iter().map(|p| (p.x, p.y)).collect();
+        let clip_bounds = super::display::selected(&monitor_id).and_then(|(_, info)| {
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect).ok()?;
+            Some(RECT {
+                left: info.rcMonitor.left - rect.left,
+                top: info.rcMonitor.top - rect.top,
+                right: info.rcMonitor.right - rect.left,
+                bottom: info.rcMonitor.bottom - rect.top,
+            })
+        });
+        if let Some(clip) = clip_bounds {
+            key.extend([(clip.left, clip.top), (clip.right, clip.bottom)]);
+        }
+        // A spring may advance without crossing a physical-pixel boundary.
+        // Leave the native region alone until its rounded contour changes.
+        if NATIVE.with(|n| n.borrow().region_pixels == key) {
+            return;
+        }
         let r = CreatePolygonRgn(&points, WINDING);
         if r.0.is_null() {
             return;
         }
+        if let Some(bounds) = clip_bounds {
+            let clip = CreateRectRgn(bounds.left, bounds.top, bounds.right, bounds.bottom);
+            if !clip.0.is_null() {
+                CombineRgn(Some(r), Some(r), Some(clip), RGN_AND);
+                let _ = DeleteObject(HGDIOBJ(clip.0));
+            }
+        }
         if SetWindowRgn(hwnd, Some(r), false) == 0 {
             let _ = DeleteObject(HGDIOBJ(r.0));
+        } else {
+            NATIVE.with(|n| n.borrow_mut().region_pixels = key);
         }
     }
 }
@@ -1097,6 +1246,11 @@ unsafe extern "system" fn subclass(
         }
         match msg {
             EDGE_HOVER => {
+                if wparam.0 == 2 {
+                    NATIVE.with(|n| n.borrow_mut().probe_pending = false);
+                    emit(Event::HoverProbe);
+                    return LRESULT(0);
+                }
                 emit(Event::EdgeHover(wparam.0 != 0));
                 return LRESULT(0);
             }
@@ -1155,6 +1309,13 @@ unsafe extern "system" fn subclass(
                 // SAFETY: this message carries a valid writable WINDOWPOS. It
                 // belongs to Windows and is not retained after the callback.
                 let proposed = &mut *(lparam.0 as *mut WINDOWPOS);
+                // Region updates also send this message with placement untouched.
+                if !proposed
+                    .flags
+                    .contains(SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)
+                {
+                    NATIVE.with(|n| n.borrow_mut().placement = None);
+                }
                 proposed.flags |= SWP_NOACTIVATE;
                 // Backend DPI/style/visibility updates must not undo desktop
                 // suppression after the policy has hidden this persistent HWND.
@@ -1171,6 +1332,8 @@ unsafe extern "system" fn subclass(
                 } as isize);
             }
             WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => {
+                super::display::invalidate();
+                NATIVE.with(|n| n.borrow_mut().placement = None);
                 let result = DefSubclassProc(hwnd, msg, wparam, lparam);
                 let post = NATIVE.with(|n| {
                     let mut n = n.borrow_mut();
@@ -1309,6 +1472,13 @@ fn popup() {
             AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr()))
         };
         let _ = add(menu, 1, "Show Island", MF_STRING);
+        let hold = NATIVE.with(|n| n.borrow().keep_visible);
+        let _ = add(
+            menu,
+            7,
+            "Keep visible",
+            MF_STRING | if hold { MF_CHECKED } else { MF_UNCHECKED },
+        );
         let _ = add(menu, 6, "Countdown timer", MF_STRING);
         let _ = add(menu, 5, "Settings…", MF_STRING);
         let _ = add(menu, 2, "Reset Island", MF_STRING);
@@ -1352,6 +1522,7 @@ fn popup() {
             4 => emit(Event::Exit),
             5 => emit(Event::OpenSettings),
             6 => emit(Event::State(IslandState::Timer)),
+            7 => emit(Event::KeepVisible),
             20 => emit(Event::State(IslandState::Idle)),
             21 => emit(Event::State(IslandState::Compact)),
             22 => emit(Event::State(IslandState::Expanded)),
@@ -1460,6 +1631,27 @@ pub fn capture_bounds() -> Result<(i32, i32, u32, u32), String> {
         (rect.bottom - rect.top) as u32,
     ))
 }
+
+/// Destination canvas position once the short hover-reveal slide settles.
+pub fn settled_capture_bounds() -> Result<(i32, i32, u32, u32), String> {
+    let bounds = capture_bounds()?;
+    let (slide, ui_scale) = NATIVE.with(|n| {
+        let n = n.borrow();
+        (n.slide, n.shape.ui_scale)
+    });
+    if slide == 0. {
+        return Ok(bounds);
+    }
+    let monitor = selected_monitor_handle();
+    if monitor == 0 {
+        return Err("Could not locate the backdrop monitor".into());
+    }
+    let scale = super::display::scale(HMONITOR(monitor as *mut _));
+    let displacement = (slide * scale * ui_scale).round() as i32;
+    let (left, top, width, height) = bounds;
+    Ok((left, top - displacement, width, height))
+}
+
 pub fn exclude_from_capture(exclude: bool) -> Result<(), String> {
     let hwnd = NATIVE.with(|n| n.borrow().hwnd);
     // SAFETY: this process owns the attached top-level window. Reversed when glass stops.
@@ -1474,6 +1666,10 @@ pub fn exclude_from_capture(exclude: bool) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())
     }
+}
+
+pub fn set_snapshot_backdrop(active: bool) {
+    NATIVE.with(|n| n.borrow_mut().snapshot_backdrop = active);
 }
 
 // Out-of-context callbacks are delivered on the hook-installing UI thread. Skip
@@ -1492,16 +1688,16 @@ unsafe extern "system" fn backdrop_event(
     if source.is_invalid() {
         return;
     }
-    if event == EVENT_OBJECT_LOCATIONCHANGE && unsafe { GetAncestor(source, GA_ROOT) } != source {
+    if event >= EVENT_OBJECT_CREATE && (object != OBJID_WINDOW.0 || child != 0) {
         return;
     }
-    if event >= EVENT_OBJECT_CREATE && (object != OBJID_WINDOW.0 || child != 0) {
+    if event == EVENT_OBJECT_LOCATIONCHANGE && unsafe { GetAncestor(source, GA_ROOT) } != source {
         return;
     }
     queue_policy();
     let hwnd = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
-        if !matches!(n.appearance, Appearance::Glass | Appearance::Acrylic) || n.refresh_pending {
+        if !n.snapshot_backdrop || n.hidden || n.refresh_pending {
             return None;
         }
         n.refresh_pending = true;
@@ -1514,8 +1710,7 @@ unsafe extern "system" fn backdrop_event(
     }
 }
 
-/// Low-overhead, on-demand sampling of the real desktop beneath the excluded
-/// overlay. Eco glass calls this on interaction/window events, never on a timer.
+/// On-demand sampling of the real desktop beneath the excluded overlay.
 #[allow(dead_code)] // Retained synchronous adapter for opt-in native diagnostics.
 pub fn capture_snapshot() -> Result<super::capture::BackdropFrame, String> {
     capture_snapshot_at(capture_bounds()?)

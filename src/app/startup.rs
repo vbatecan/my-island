@@ -85,8 +85,11 @@ fn finish(app: &Rc<RefCell<App>>, status: StartupStatus, error: Option<String>, 
     if let Some(next) = next {
         request(app, next);
     } else {
-        if persist && let Err(error) = app.borrow().settings.save() {
-            settings_status(app, &format!("Preferences could not be saved: {error}"));
+        if persist {
+            let saved = app.borrow().settings.save();
+            if let Err(error) = saved {
+                settings_status(app, &format!("Preferences could not be saved: {error}"));
+            }
         }
         refresh_preferences(app);
     }

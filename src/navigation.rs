@@ -23,6 +23,7 @@ impl Page {
         let value = value.trim();
         let page = match value {
             "home" => Self::Home,
+            "downloads" => Self::Home,
             "media" => Self::Media,
             "timer" => Self::Timer,
             "volume" => Self::Volume,
@@ -52,6 +53,13 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn removed_downloads_selection_migrates_to_home() {
+        assert_eq!(Page::parse("downloads"), Some(Page::Home));
+        let settings = crate::settings::Settings::parse("selected_page=downloads\n");
+        assert_eq!(settings.selected_page, Some(Page::Home));
+        assert!(settings.encode().contains("selected_page=home"));
+    }
 
     #[test]
     fn page_identity_round_trips_without_index_coupling() {

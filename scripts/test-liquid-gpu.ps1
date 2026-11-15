@@ -1,4 +1,7 @@
-param([string]$Executable='target/release/still-island.exe')
+param(
+    [string]$Executable='target/release/still-island.exe',
+    [ValidateSet('acrylic','glass','live-glass','liquid-glass')][string]$LiveAppearance
+)
 $ErrorActionPreference='Stop'
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $binary=(Resolve-Path -LiteralPath $Executable).Path
@@ -23,6 +26,10 @@ $start.CreateNoWindow=$true
 $start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 $start.WorkingDirectory=$run
 $start.Arguments='--verify-liquid --appearance=liquid-glass --isolated-material-probe'
+if ($LiveAppearance) {
+    Add-Content -LiteralPath (Join-Path $profile 'settings.ini') -Value 'animations=false'
+    $start.Arguments = "--verify-liquid --verify-live-material --appearance=$LiveAppearance --isolated-material-probe"
+}
 $start.EnvironmentVariables['LOCALAPPDATA']=$run
 $application=[Diagnostics.Process]::Start($start)
 try {
@@ -30,7 +37,8 @@ try {
  if($application.ExitCode -ne 0){throw "Liquid fixture exited with $($application.ExitCode). Evidence: $run"}
  $lines=Get-Content -LiteralPath (Join-Path $run 'verification.log')
  $lines|Write-Output
- if(($lines -match 'FAILED|GPU setup failed|GPU rendering failed') -or -not ($lines -match 'liquid verification complete')){throw 'Liquid fixture failed.'}
+ $completion = if ($LiveAppearance) { 'live material verification complete' } else { 'liquid verification complete' }
+ if(($lines -match 'FAILED|GPU setup failed|GPU rendering failed') -or -not ($lines -match $completion)){throw "Material fixture failed. Evidence: $run"}
  Write-Output "Evidence: $run"
 } finally {
  if(-not $application.HasExited){$application.Kill()}

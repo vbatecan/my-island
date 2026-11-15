@@ -1,7 +1,11 @@
 //! Opt-in regression orchestration kept outside the production UI lifecycle.
 use super::*;
 
-const VERIFICATION_FLAGS: [&str; 14] = [
+const VERIFICATION_FLAGS: [&str; 18] = [
+    "--verify-surface",
+    "--verify-product",
+    "--verify-hover-morph",
+    "--verify-downloads",
     "--verify-liquid",
     "--verify-illustrations",
     "--verify-launcher",
@@ -27,6 +31,20 @@ pub(super) fn blocks_live_input() -> bool {
     enabled() || has_arg("--benchmark")
 }
 pub(super) fn setup(app: &Rc<RefCell<App>>) -> slint::Timer {
+    if has_arg("--verify-surface") {
+        return slint::Timer::default();
+    }
+    if has_arg("--verify-product") {
+        product_verification::setup(app);
+        return slint::Timer::default();
+    }
+    if has_arg("--verify-hover-morph") {
+        hover_morph_verification::setup(app);
+        return slint::Timer::default();
+    }
+    if has_arg("--verify-downloads") {
+        return slint::Timer::default();
+    }
     if has_arg("--verify-liquid") {
         liquid_verification::setup(app);
         return slint::Timer::default();
@@ -76,7 +94,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) -> slint::Timer {
         let weak = Rc::downgrade(app);
         slint::Timer::single_shot(Duration::from_millis(1800), move || {
             if let Some(app) = weak.upgrade() {
-                let ui = app.borrow().preferences.upgrade();
+                let ui = app.borrow().preferences();
                 if let Some(ui) = ui {
                     match crate::verification::snapshot_preferences(&ui) {
                         Ok(path) => record(&format!("settings snapshot {}", path.display())),

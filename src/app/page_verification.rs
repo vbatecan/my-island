@@ -26,7 +26,10 @@ fn capture(ui: &IslandWindow, name: &str) {
         Err(error) => record(&format!("pages FAILED snapshot {error}")),
     }
 }
-fn send_wheel(app: &Rc<RefCell<App>>, point: (f64, f64)) -> slint::winit_030::EventResult {
+pub(super) fn send_wheel(
+    app: &Rc<RefCell<App>>,
+    point: (f64, f64),
+) -> slint::winit_030::EventResult {
     use slint::winit_030::winit::event::{DeviceId, MouseScrollDelta, TouchPhase, WindowEvent};
     app.borrow_mut().pointer = Some(point);
     handle_overlay_input(

@@ -40,6 +40,8 @@ use windows::{
     core::{IInspectable, Interface, factory},
 };
 
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Debug)]
 pub struct BackdropFrame {
     pub width: u32,
@@ -48,8 +50,8 @@ pub struct BackdropFrame {
     pub pixels: Vec<u8>,
 }
 
-/// A live capture session exists only while Glass is selected. Windows supplies
-/// FrameArrived events; no timer, desktop polling, files, or network are used.
+/// One session for a visible sampling material. Windows supplies FrameArrived
+/// events; only in-flight GPU readbacks need finite worker wakeups.
 pub struct CaptureService {
     stop: Sender<bool>,
     worker: Option<JoinHandle<()>>,
@@ -58,6 +60,7 @@ impl CaptureService {
     pub fn start(
         rect: (i32, i32, u32, u32),
         monitor_handle: isize,
+        max_fps: u32,
         on_frame: impl Fn(BackdropFrame) + Send + Sync + 'static,
         on_error: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<Self, String> {
@@ -66,27 +69,50 @@ impl CaptureService {
         }
         let (stop, stopped) = mpsc::channel();
         let wake = stop.clone();
+        // Capture's interval uses units of 100 ns.
+        let interval_ticks = 10_000_000u32.div_ceil(max_fps.clamp(1, 60));
 
         let callback: Arc<dyn Fn(BackdropFrame) + Send + Sync> = Arc::new(on_frame);
         let worker = thread::Builder::new()
             .name("island-backdrop".into())
             .spawn(move || {
+                // Wait for the compositor off the UI thread before asking WGC
+                // to sample the monitor with our window excluded.
+                super::settle_exclusion();
+                if stopped.try_recv().is_ok() {
+                    return;
+                }
                 // SAFETY: this new worker has no COM apartment. Every WinRT resource
                 // is released before the matching RoUninitialize on this thread.
                 if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
                     on_error(format!("Backdrop WinRT initialization failed: {error}"));
                     return;
                 }
-                match Session::new(rect, monitor_handle, callback, wake) {
+                match Session::new(rect, monitor_handle, interval_ticks, callback, wake) {
                     Ok(session) => {
+                        let started = Instant::now();
+                        let mut received_frame = false;
                         loop {
                             let pending = session.readback.as_ref().is_some_and(|r| {
                                 r.lock()
                                     .is_ok_and(|r| r.slots.iter().any(|s| s.pending.is_some()))
                             });
-                            let stopped_now = if pending {
+                            if !received_frame && started.elapsed() >= FIRST_FRAME_TIMEOUT {
+                                on_error(
+                                    "Windows capture did not deliver a backdrop frame.".into(),
+                                );
+                                break;
+                            }
+                            let timeout = if pending {
+                                Some(Duration::from_millis(2))
+                            } else if !received_frame {
+                                Some(FIRST_FRAME_TIMEOUT.saturating_sub(started.elapsed()))
+                            } else {
+                                None
+                            };
+                            let stopped_now = if let Some(timeout) = timeout {
                                 matches!(
-                                    stopped.recv_timeout(Duration::from_millis(2)),
+                                    stopped.recv_timeout(timeout),
                                     Ok(true) | Err(mpsc::RecvTimeoutError::Disconnected)
                                 )
                             } else {
@@ -95,11 +121,18 @@ impl CaptureService {
                             if stopped_now {
                                 break;
                             }
-                            if let Some(readback) = &session.readback
-                                && let Ok(mut state) = readback.lock()
-                            {
-                                match state.poll() {
+                            let result = session
+                                .readback
+                                .as_ref()
+                                .and_then(|readback| readback.lock().ok())
+                                .map(|mut state| {
+                                    let ready = state.ready.take();
+                                    state.poll().map(|frame| frame.or(ready))
+                                });
+                            if let Some(result) = result {
+                                match result {
                                     Ok(Some(image)) => {
+                                        received_frame = true;
                                         if let Some(notify) = &session.notify {
                                             notify(image);
                                         }
@@ -151,6 +184,7 @@ impl Session {
     fn new(
         rect: (i32, i32, u32, u32),
         monitor_handle: isize,
+        interval_ticks: u32,
         notify: Arc<dyn Fn(BackdropFrame) + Send + Sync>,
         wake: Sender<bool>,
     ) -> Result<Self, String> {
@@ -253,45 +287,33 @@ impl Session {
             }
             // Capture only the upper-left monitor extent containing the canvas;
             // a complete monitor-sized backing texture is unnecessary for this ROI.
-            // Optional Windows 11 throttle: at most 30 backdrop frames/s, only
-            // when Windows raises a frame event. Older builds may lack this property.
-            let _ = resources
+            // Windows 11 can pace events natively. Older builds use the same
+            // limit in the reader.
+            let native_throttle = resources
                 .session
-                .SetMinUpdateInterval(TimeSpan { Duration: 333_333 });
-            let _ = resources.session.SetDirtyRegionMode(
-                windows::Graphics::Capture::GraphicsCaptureDirtyRegionMode::ReportOnly,
-            );
+                .SetMinUpdateInterval(TimeSpan {
+                    Duration: i64::from(interval_ticks),
+                })
+                .is_ok();
+            let tracks_dirty_regions = resources
+                .session
+                .SetDirtyRegionMode(
+                    windows::Graphics::Capture::GraphicsCaptureDirtyRegionMode::ReportOnly,
+                )
+                .is_ok();
             let mut mip = 0u32;
             while (rect.2 >> mip).max(1) as u64 * (rect.3 >> mip).max(1) as u64 > 262_144 {
                 mip += 1;
             }
             let width = (rect.2 >> mip).max(1);
             let height = (rect.3 >> mip).max(1);
-            let mut roi = None;
-            let description = D3D11_TEXTURE2D_DESC {
-                Width: rect.2,
-                Height: rect.3,
-                MipLevels: mip + 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-                MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
-                ..Default::default()
+            let downsample = if mip > 0 {
+                Some(Downsample::new(&device, rect.2, rect.3, mip)?)
+            } else {
+                // A small canvas fits staging at its native resolution. Crop
+                // straight into staging and skip the intermediate texture.
+                None
             };
-            unsafe {
-                device.CreateTexture2D(&description, None, Some(&mut roi))?;
-            }
-            let roi = roi.ok_or_else(windows::core::Error::empty)?;
-            let mut view = None;
-            unsafe {
-                device.CreateShaderResourceView(&roi, None, Some(&mut view))?;
-            }
-            let view = view.ok_or_else(windows::core::Error::empty)?;
             let mut slots = Vec::with_capacity(3);
             for _ in 0..3 {
                 let mut texture = None;
@@ -320,9 +342,7 @@ impl Session {
             let readback = Arc::new(Mutex::new(Readback {
                 _device: device,
                 context,
-                roi,
-                view,
-                mip,
+                downsample,
                 slots,
                 left: left as u32,
                 top: top as u32,
@@ -332,12 +352,17 @@ impl Session {
                 height,
                 last: Vec::new(),
                 last_read: None,
+                native_throttle,
+                frame_interval: Duration::from_nanos(u64::from(interval_ticks) * 100),
+                tracks_dirty_regions,
+                needs_sample: true,
                 serial: 0,
                 delivered: 0,
                 failure: None,
+                ready: None,
             }));
             resources.readback = Some(readback.clone());
-            resources.notify = Some(notify.clone());
+            resources.notify = Some(notify);
             let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
                 move |pool, _| {
                     let Some(pool) = pool.as_ref() else {
@@ -347,24 +372,15 @@ impl Session {
                         return Ok(());
                     };
                     let frame = FrameLease(frame);
-                    let image =
-                        readback
-                            .lock()
-                            .ok()
-                            .and_then(|mut state| match state.read(&frame.0) {
-                                Ok(image) => image,
-                                Err(error) => {
-                                    state.failure = Some(error);
-                                    None
-                                }
-                            });
-                    let _ = wake.send(false);
-                    // Return the frame before invoking application code. The callback
-                    // may enqueue a GUI event but must not block this WGC worker.
-                    drop(frame);
-                    if let Some(image) = image {
-                        notify(image);
+                    if let Ok(mut state) = readback.lock()
+                        && let Err(error) = state.read(&frame.0)
+                    {
+                        state.failure = Some(error);
                     }
+                    drop(frame);
+                    // Only the owned worker prepares and publishes completed
+                    // frames, so separate callbacks cannot reorder them.
+                    let _ = wake.send(false);
                     Ok(())
                 },
             );
@@ -384,6 +400,49 @@ impl Drop for Session {
         let _ = self.pool.Close();
     }
 }
+
+struct Downsample {
+    texture: ID3D11Texture2D,
+    view: ID3D11ShaderResourceView,
+    mip: u32,
+}
+
+impl Downsample {
+    fn new(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        mip: u32,
+    ) -> windows::core::Result<Self> {
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: mip + 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
+            ..Default::default()
+        };
+        let mut texture = None;
+        let mut view = None;
+        // SAFETY: the correctly sized descriptors and output slots live for the calls.
+        let texture = unsafe {
+            device.CreateTexture2D(&description, None, Some(&mut texture))?;
+            let texture = texture.ok_or_else(windows::core::Error::empty)?;
+            device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
+            texture
+        };
+        let view = view.ok_or_else(windows::core::Error::empty)?;
+        Ok(Self { texture, view, mip })
+    }
+}
+
 struct FrameLease(Direct3D11CaptureFrame);
 impl Drop for FrameLease {
     fn drop(&mut self) {
@@ -397,9 +456,7 @@ struct Slot {
 struct Readback {
     _device: ID3D11Device,
     context: ID3D11DeviceContext,
-    roi: ID3D11Texture2D,
-    view: ID3D11ShaderResourceView,
-    mip: u32,
+    downsample: Option<Downsample>,
     slots: Vec<Slot>,
     left: u32,
     top: u32,
@@ -409,9 +466,14 @@ struct Readback {
     height: u32,
     last: Vec<u8>,
     last_read: Option<Instant>,
+    native_throttle: bool,
+    frame_interval: Duration,
+    tracks_dirty_regions: bool,
+    needs_sample: bool,
     serial: u64,
     delivered: u64,
     failure: Option<windows::core::Error>,
+    ready: Option<BackdropFrame>,
 }
 impl Readback {
     /// Nonblocking staging maps are confined to the capture worker. A final queued
@@ -500,18 +562,12 @@ impl Readback {
             pixels,
         }))
     }
-    fn read(
-        &mut self,
-        frame: &Direct3D11CaptureFrame,
-    ) -> windows::core::Result<Option<BackdropFrame>> {
-        let completed = self.poll()?;
-        if self
-            .last_read
-            .is_some_and(|last| last.elapsed() < Duration::from_millis(33))
-        {
-            return Ok(completed);
+    fn read(&mut self, frame: &Direct3D11CaptureFrame) -> windows::core::Result<()> {
+        if let Some(completed) = self.poll()? {
+            self.ready = Some(completed);
         }
-        if self.serial > 0
+        if !self.needs_sample
+            && self.tracks_dirty_regions
             && let Ok(regions) = frame.DirtyRegions()
         {
             let mut overlap = false;
@@ -523,11 +579,22 @@ impl Readback {
                     && r.Y + r.Height > self.top as i32;
             }
             if !overlap {
-                return Ok(completed);
+                return Ok(());
             }
         }
+        // Keep a dirty update pending if older Windows builds need software
+        // throttling or all staging slots are busy. A later event may describe
+        // an unrelated dirty region but its complete surface still has the change.
+        self.needs_sample = true;
+        if !self.native_throttle
+            && self
+                .last_read
+                .is_some_and(|last| last.elapsed() < self.frame_interval)
+        {
+            return Ok(());
+        }
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.pending.is_none()) else {
-            return Ok(completed);
+            return Ok(());
         };
         let surface = frame.Surface()?;
         let interop: IDirect3DDxgiInterfaceAccess = surface.cast()?;
@@ -537,7 +604,7 @@ impl Readback {
             texture.GetDesc(&mut desc);
         }
         if self.left + self.crop_width > desc.Width || self.top + self.crop_height > desc.Height {
-            return Ok(completed);
+            return Ok(());
         }
         let source = D3D11_BOX {
             left: self.left,
@@ -548,26 +615,46 @@ impl Readback {
             back: 1,
         };
         unsafe {
-            self.context
-                .CopySubresourceRegion(&self.roi, 0, 0, 0, 0, &texture, 0, Some(&source));
-            if self.mip > 0 {
-                self.context.GenerateMips(&self.view);
+            if let Some(downsample) = &self.downsample {
+                self.context.CopySubresourceRegion(
+                    &downsample.texture,
+                    0,
+                    0,
+                    0,
+                    0,
+                    &texture,
+                    0,
+                    Some(&source),
+                );
+                self.context.GenerateMips(&downsample.view);
+                self.context.CopySubresourceRegion(
+                    &slot.texture,
+                    0,
+                    0,
+                    0,
+                    0,
+                    &downsample.texture,
+                    downsample.mip,
+                    None,
+                );
+            } else {
+                self.context.CopySubresourceRegion(
+                    &slot.texture,
+                    0,
+                    0,
+                    0,
+                    0,
+                    &texture,
+                    0,
+                    Some(&source),
+                );
             }
-            self.context.CopySubresourceRegion(
-                &slot.texture,
-                0,
-                0,
-                0,
-                0,
-                &self.roi,
-                self.mip,
-                None,
-            );
             self.context.Flush();
         }
         self.serial += 1;
+        self.needs_sample = false;
         slot.pending = Some((self.serial, Instant::now()));
         self.last_read = Some(Instant::now());
-        Ok(completed)
+        Ok(())
     }
 }

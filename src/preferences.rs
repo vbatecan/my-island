@@ -11,22 +11,8 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
     use slint::ComponentHandle;
     let weak = ui.as_weak();
     let mut renderer: Option<crate::liquid::Renderer> = None;
-    let mut sample = crate::material::Backdrop {
-        width: 512,
-        height: 256,
-        pixels: Vec::with_capacity(512 * 256 * 4),
-    };
-    for y in 0..256 {
-        for x in 0..512 {
-            sample
-                .pixels
-                .extend_from_slice(if (x / 60 + y / 40) % 2 == 0 {
-                    &[215, 222, 235, 255]
-                } else {
-                    &[75, 117, 150, 255]
-                });
-        }
-    }
+    let mut sample = None;
+    let mut failed = false;
     let result = ui.window().set_rendering_notifier(move |state, api| {
         if matches!(state, slint::RenderingState::RenderingTeardown) {
             if let Some(ui) = weak.upgrade() {
@@ -41,19 +27,27 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
         }
         let Some(ui) = weak.upgrade() else { return };
         match state {
-            slint::RenderingState::RenderingSetup => {
-                if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
-                    // SAFETY: notifier owns this current GL context.
-                    renderer = unsafe {
-                        crate::liquid::Renderer::new(glow::Context::from_loader_function_cstr(
-                            get_proc_address,
-                        ))
+            slint::RenderingState::RenderingSetup => failed = false,
+            slint::RenderingState::BeforeRendering => {
+                if ui.get_appearance_index() != Appearance::LiquidGlass as i32 {
+                    if let Some(gpu) = renderer.take() {
+                        ui.set_liquid_preview(slint::Image::default());
+                        // SAFETY: the image is detached and the context is current.
+                        unsafe {
+                            gpu.destroy();
+                        }
                     }
-                    .ok();
+                    sample = None;
+                    failed = false;
+                    return;
                 }
-            }
-            slint::RenderingState::BeforeRendering if ui.get_appearance_index() == 5 => {
+                if renderer.is_none() && !failed {
+                    // SAFETY: Slint owns the current preview context.
+                    renderer = unsafe { crate::liquid::Renderer::for_graphics_api(api) }.ok();
+                    failed = renderer.is_none();
+                }
                 let Some(gpu) = renderer.as_mut() else { return };
+                let sample = sample.get_or_insert_with(preview_backdrop);
                 let form = if ui.get_form_factor_index() == 0 {
                     crate::shape::FormFactor::Notch
                 } else {
@@ -77,18 +71,15 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
                     radius as f64,
                     form,
                 );
-                let geometry =
-                    crate::liquid::Geometry::new([w, h], contour, 1., ui.get_tint(), false);
-                if let Ok(Some(image)) = gpu.render(&sample, 1, geometry, contour, true) {
+                let geometry = crate::liquid::Geometry::new(
+                    [w, h],
+                    contour,
+                    1.,
+                    ui.get_tint(),
+                    ui.get_tint() >= 0.35,
+                );
+                if let Ok(Some(image)) = gpu.render(sample, 1, geometry, true) {
                     ui.set_liquid_preview(image);
-                }
-            }
-            slint::RenderingState::RenderingTeardown => {
-                ui.set_liquid_preview(slint::Image::default());
-                if let Some(gpu) = renderer.take() {
-                    unsafe {
-                        gpu.destroy();
-                    }
                 }
             }
             _ => {}
@@ -97,6 +88,26 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
     if let Err(error) = result {
         eprintln!("Liquid preview renderer unavailable: {error:?}");
     }
+}
+
+fn preview_backdrop() -> crate::material::Backdrop {
+    let mut sample = crate::material::Backdrop {
+        width: 512,
+        height: 256,
+        pixels: Vec::with_capacity(512 * 256 * 4),
+    };
+    for y in 0..256 {
+        for x in 0..512 {
+            sample
+                .pixels
+                .extend_from_slice(if (x / 60 + y / 40) % 2 == 0 {
+                    &[215, 222, 235, 255]
+                } else {
+                    &[75, 117, 150, 255]
+                });
+        }
+    }
+    sample
 }
 pub fn populate(
     ui: &SettingsWindow,
@@ -158,6 +169,8 @@ pub fn populate(
     ui.set_compact_now_playing(s.compact_now_playing);
     ui.set_online_lyrics(s.online_lyrics);
     ui.set_hover_expand(s.hover_expand);
+    ui.set_hide_on_hover(s.hide_on_hover);
+    ui.set_hover_only_maximized(s.hover_only_maximized);
     ui.set_hover_delay(s.hover_delay as i32);
     ui.set_collapse_delay(s.collapse_delay as i32);
     ui.set_scroll_volume(s.scroll_volume);
@@ -229,6 +242,8 @@ pub fn read(ui: &SettingsWindow, old: &Settings, monitors: &[MonitorInfo]) -> Se
     s.compact_now_playing = ui.get_compact_now_playing();
     s.online_lyrics = ui.get_online_lyrics();
     s.hover_expand = ui.get_hover_expand();
+    s.hide_on_hover = ui.get_hide_on_hover();
+    s.hover_only_maximized = ui.get_hover_only_maximized();
     s.hover_delay = ui.get_hover_delay().max(0) as u32;
     s.collapse_delay = ui.get_collapse_delay().max(0) as u32;
     s.scroll_volume = ui.get_scroll_volume();

@@ -1,11 +1,12 @@
 #version 330 core
+uniform int optics; // Liquid, Acrylic, Glass
 uniform sampler2D backdrop;
 uniform sampler2D blurred;
 uniform vec2 canvas;
 uniform vec2 target_size;
 uniform vec4 shape; // total width, height, radius, shoulder
-uniform vec4 edges[16]; // two vec4s per shared line/arc
 uniform float tint;
+uniform float sample_y;
 uniform float support; // +1 for dark text, -1 for light text
 uniform int pass;
 out vec4 color;
@@ -65,7 +66,34 @@ void main() {
     vec3 dn=distance_normal(p);
     float coverage=clamp(.5-dn.x*target_size.x/canvas.x,0.,1.);
     if(coverage==0.) { color=vec4(0); return; }
+    // Capture stays anchored to the settled window position while the notch
+    // slides. Read from the actual desktop position of each rendered pixel.
+    vec2 backdrop_uv=uv+vec2(0.,sample_y/canvas.y);
+    // Acrylic receives a prepared blurred backdrop once per capture. Only the
+    // contour mask changes during the morph; no CPU rasterization or readback.
+    if(optics==1) { color=vec4(texture(backdrop,backdrop_uv).rgb,coverage); return; }
     float depth=max(-dn.x,0.);
+    if(optics==2) {
+        // The original glass bevel, now sampled in the renderer rather than
+        // rasterized on the UI thread for every spring position.
+        float bezel=min(12.,shape.y*.46);
+        const float f0=(.45/2.45)*(.45/2.45);
+        float reflection=f0*.55+pow(.61,18.)*.16;
+        vec2 refracted=backdrop_uv;
+        if(depth<bezel) {
+            float t=clamp(depth/bezel,.0001,1.);
+            float arc=sqrt(1.-(1.-t)*(1.-t));
+            float slope=min(8.,8.*(1.-t)/(bezel*arc));
+            vec3 normal=normalize(vec3(dn.yz*slope,1.));
+            vec3 ray=refract(vec3(0.,0.,-1.),normal,1./1.45);
+            refracted+=ray.xy*(12./max(-ray.z,.05))/canvas;
+            float fresnel=f0+(1.-f0)*pow(1.-normal.z,5.);
+            float light=max(dot(normal,vec3(-.45,-.65,.61)),0.);
+            reflection=fresnel*.55+pow(light,18.)*.16;
+        }
+        color=vec4(mix(texture(backdrop,refracted).rgb,vec3(1.),reflection*coverage),coverage);
+        return;
+    }
     // Convex superellipse cross section: finite slope and a smooth flat centre.
     float t=clamp(1.-depth/8.,0.,.999);
     float slope=min(8.,pow(t,3.)/pow(max(1.-pow(t,4.),.001),.75));
@@ -74,8 +102,11 @@ void main() {
     vec2 displacement=ray.xy*(6./max(-ray.z,.15));
     float len=length(displacement);
     displacement*=min(1.,6./max(len,1e-6));
-    vec2 refracted=uv+displacement/canvas;
+    vec2 refracted=backdrop_uv+displacement/canvas;
     vec3 c=mix(linearize(texture(backdrop,refracted).rgb),linearize(texture(blurred,refracted).rgb),.35);
+    // Match the black-opacity control in display space, retaining backdrop hue.
+    // Tint the transmitted light before adding the curved bezel reflection.
+    c=linearize(encode(c)*(1.-clamp(tint,0.,1.)));
     float fresnel=.04+.96*pow(1.-n.z,5.);
     float edge=1.-smoothstep(0.,8.,depth);
     float directional=max(dot(n,normalize(vec3(-.45,-.65,1))),0.);
@@ -83,7 +114,6 @@ void main() {
     float glint=exp(-depth/1.1)*pow(directional,4.);
     c=mix(c,vec3(.85,.91,1),edge*(fresnel*.25+glint*.16));
     c*=1.-.075*exp(-pow((depth-2.5)/1.4,2.));
-    c*=1.-.10*tint;
     // Feathered support is restricted to the content inset, never the entire panel.
     vec2 inset=min(p-vec2(shape.w+14.,8.),vec2(shape.x-shape.w-14.,shape.y-8.)-p);
     float local=smoothstep(0.,12.,min(inset.x,inset.y));
