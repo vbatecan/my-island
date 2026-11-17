@@ -1,4 +1,4 @@
-//! Real battery handler regression; no injected input or manual animation triggers.
+//! Regression checks for battery effects and the volume bar.
 use super::*;
 fn check(ok: bool, message: &str) {
     record(&format!(
@@ -13,7 +13,7 @@ fn capture(ui: &IslandWindow, name: &str) {
 }
 pub(super) fn setup(app: &Rc<RefCell<App>>) {
     for (step, at) in [
-        700, 1000, 2300, 2900, 3100, 3400, 4200, 4500, 4600, 4900, 5300,
+        700, 1000, 2300, 2900, 3100, 3400, 4200, 4500, 4600, 4900, 5300, 6100, 6400, 6800,
     ]
     .into_iter()
     .enumerate()
@@ -83,6 +83,22 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                         ui.get_charge_intensity() == 0.,
                         "unlock does not replay effect",
                     );
+                }
+                10 => {
+                    transition(&app, IslandState::Volume);
+                    ui.set_volume_available(true);
+                    ui.set_volume(20);
+                }
+                11 => {
+                    ui.set_volume(80);
+                    check(ui.get_volume_fill() < 0.8, "volume bar interpolates");
+                }
+                12 => {
+                    check(
+                        (ui.get_volume_fill() - 0.8).abs() < 0.01,
+                        "volume fill settles at the new level",
+                    );
+                    capture(&ui, "illustration-volume-raised");
                 }
                 _ => {
                     record("illustration verification complete");

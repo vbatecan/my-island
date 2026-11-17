@@ -135,6 +135,12 @@ export component IslandWindow inherits Window {
     in property <bool> volume-mode: false;
     in property <bool> playing: false;
     in property <int> volume: 0;
+    out property <float> volume-fill: root.volume / 100;
+    animate volume-fill {
+        duration: root.illustration-motion && !compact-slider.pressed && !volume-slider.pressed
+            ? 150ms / root.animation-speed : 0ms;
+        easing: ease-out;
+    }
     in property <bool> volume-muted: false;
     in property <bool> volume-available: false;
     in property <bool> media-available: false;
@@ -428,7 +434,7 @@ export component IslandWindow inherits Window {
                     }
                     Text { x: (34 * root.scaled-pixel); y: 0px; width: (110 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (12 * root.font-pixel); font-weight: 600; text: root.volume-muted ? "Muted" : "Volume"; }
                     Text { x: (140 * root.scaled-pixel); y: 0px; width: (44 * root.scaled-pixel); height: (18 * root.scaled-pixel); horizontal-alignment: right; color: (root.light-material ? #4b4b54 : #c4c4ca); font-size: (11 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
-                    ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: (34 * root.scaled-pixel); y: (23 * root.scaled-pixel); width: (150 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e7e7eb); }
+                    ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: (34 * root.scaled-pixel); y: (23 * root.scaled-pixel); width: (150 * root.scaled-pixel); value: compact-slider.pressed ? min(1, max(0, compact-slider.mouse-x / compact-slider.width)) : root.volume-fill; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e7e7eb); }
                     compact-slider := TouchArea {
                         x: (34 * root.scaled-pixel); y: (16 * root.scaled-pixel); width: (150 * root.scaled-pixel); height: (14 * root.scaled-pixel);
                         enabled: root.volume-available;
@@ -604,7 +610,7 @@ export component IslandWindow inherits Window {
                             background: volume-touch.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #00000011 : #ffffff11);
                             Glyph { light-material: root.light-material; ui-scale: root.ui-scale; x: (12 * root.scaled-pixel); y: (13 * root.scaled-pixel); width: (22 * root.scaled-pixel); height: (22 * root.scaled-pixel); text: root.volume-muted ? "\u{e74f}" : "\u{e767}"; }
                             Text { x: (43 * root.scaled-pixel); y: (16 * root.scaled-pixel); width: (50 * root.scaled-pixel); height: (18 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (13 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
-                            ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: (13 * root.scaled-pixel); y: (48 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (4 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e7e7eb); }
+                            ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: (13 * root.scaled-pixel); y: (48 * root.scaled-pixel); width: (78 * root.scaled-pixel); height: (4 * root.scaled-pixel); value: root.volume-fill; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e7e7eb); }
                             volume-touch := TouchArea { clicked => { root.open-volume(); } }
                         }
                         Rectangle { x: 0px; y: (70 * root.scaled-pixel); width: root.battery-present ? (96 * root.scaled-pixel) : (150 * root.scaled-pixel); height: (22 * root.scaled-pixel); border-radius: (5 * root.scaled-pixel); background: timer-entry.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #0000000c : #ffffff0c);
@@ -706,7 +712,7 @@ export component IslandWindow inherits Window {
                         Text { x: (52 * root.scaled-pixel); y: root.scaled-pixel; width: (165 * root.scaled-pixel); height: (29 * root.scaled-pixel); color: (root.light-material ? #202024 : white); font-size: (16 * root.font-pixel); font-weight: 600; text: root.volume-muted ? "Muted" : "Output volume"; }
                         Text { x: (52 * root.scaled-pixel); y: (32 * root.scaled-pixel); width: (165 * root.scaled-pixel); height: (21 * root.scaled-pixel); overflow: elide; color: (root.light-material ? #4b4b54 : #aaaab4); font-size: (11 * root.font-pixel); text: root.volume-available ? "Default Windows output" : "No output device available"; }
                         Text { x: (224 * root.scaled-pixel); y: root.scaled-pixel; width: (88 * root.scaled-pixel); height: (42 * root.scaled-pixel); horizontal-alignment: right; color: (root.light-material ? #202024 : white); font-size: (23 * root.font-pixel); text: root.volume-available ? root.volume + "%" : "—"; }
-                        ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (62 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (6 * root.scaled-pixel); value: root.volume / 100; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e4e4ea); show-thumb: true; thumb-size: (12 * root.scaled-pixel); thumb-color: root.volume-available ? (root.light-material ? #202024 : white) : (root.light-material ? #4b4b54 : #96969e); }
+                        ProgressTrack { light-material: root.light-material; ui-scale: root.ui-scale; x: 0px; y: (62 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (6 * root.scaled-pixel); value: volume-slider.pressed ? min(1, max(0, volume-slider.mouse-x / volume-slider.width)) : root.volume-fill; fill-color: root.volume-muted ? (root.light-material ? #4b4b54 : #96969e) : (root.light-material ? #202024 : #e4e4ea); show-thumb: true; thumb-size: (12 * root.scaled-pixel); thumb-color: root.volume-available ? (root.light-material ? #202024 : white) : (root.light-material ? #4b4b54 : #96969e); }
                         volume-slider := TouchArea {
                             x: 0px; y: (49 * root.scaled-pixel); width: (312 * root.scaled-pixel); height: (31 * root.scaled-pixel);
                             enabled: root.volume-available;
