@@ -2,27 +2,25 @@
 use crate::{
     NotificationApp, SettingsWindow,
     platform::MonitorInfo,
-    settings::{Appearance, Bounce, Privacy, Settings},
+    settings::{Appearance, Bounce, LiquidGlassSettings, Privacy, Settings},
 };
 use slint::{ModelRc, VecModel};
 use std::rc::Rc;
-/// Each Slint window has its own GL context and owns its own borrowed images.
+/// Render the preview with the same material as the island.
 pub fn install_preview_renderer(ui: &SettingsWindow) {
+    use crate::liquid_rust_renderer::{Layout, Worker};
     use slint::ComponentHandle;
+    use std::sync::Arc;
     let weak = ui.as_weak();
-    let mut renderer: Option<crate::liquid::Renderer> = None;
+    let mut renderer = None;
     let mut sample = None;
     let mut failed = false;
-    let result = ui.window().set_rendering_notifier(move |state, api| {
+    let result = ui.window().set_rendering_notifier(move |state, _| {
         if matches!(state, slint::RenderingState::RenderingTeardown) {
             if let Some(ui) = weak.upgrade() {
                 ui.set_liquid_preview(slint::Image::default());
             }
-            if let Some(gpu) = renderer.take() {
-                unsafe {
-                    gpu.destroy();
-                }
-            }
+            renderer = None;
             return;
         }
         let Some(ui) = weak.upgrade() else { return };
@@ -30,24 +28,29 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
             slint::RenderingState::RenderingSetup => failed = false,
             slint::RenderingState::BeforeRendering => {
                 if ui.get_appearance_index() != Appearance::LiquidGlass as i32 {
-                    if let Some(gpu) = renderer.take() {
+                    if renderer.take().is_some() {
                         ui.set_liquid_preview(slint::Image::default());
-                        // SAFETY: the image is detached and the context is current.
-                        unsafe {
-                            gpu.destroy();
-                        }
                     }
                     sample = None;
                     failed = false;
                     return;
                 }
                 if renderer.is_none() && !failed {
-                    // SAFETY: Slint owns the current preview context.
-                    renderer = unsafe { crate::liquid::Renderer::for_graphics_api(api) }.ok();
-                    failed = renderer.is_none();
+                    let weak = weak.clone();
+                    match Worker::start(move || {
+                        let _ = weak.upgrade_in_event_loop(|ui| ui.window().request_redraw());
+                    }) {
+                        Ok(worker) => renderer = Some(worker),
+                        Err(error) => {
+                            eprintln!("Liquid Glass preview unavailable: {error}");
+                            failed = true;
+                        }
+                    }
                 }
-                let Some(gpu) = renderer.as_mut() else { return };
-                let sample = sample.get_or_insert_with(preview_backdrop);
+                let Some(worker) = renderer.as_mut() else {
+                    return;
+                };
+                let sample = sample.get_or_insert_with(|| Arc::new(preview_backdrop()));
                 let form = if ui.get_form_factor_index() == 0 {
                     crate::shape::FormFactor::Notch
                 } else {
@@ -71,15 +74,23 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
                     radius as f64,
                     form,
                 );
-                let geometry = crate::liquid::Geometry::new(
-                    [w, h],
+                let layout = Layout {
+                    canvas: [w, h],
                     contour,
-                    1.,
-                    ui.get_tint(),
-                    ui.get_tint() >= 0.35,
-                );
-                if let Ok(Some(image)) = gpu.render(sample, 1, geometry, true) {
-                    ui.set_liquid_preview(image);
+                    scale: 1.,
+                    tint: ui.get_tint(),
+                    optics: read_liquid_glass(&ui),
+                    sample_y: 0.,
+                };
+                match worker.update(sample, 1, layout) {
+                    Ok(Some(image)) => ui.set_liquid_preview(image),
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("Liquid Glass preview unavailable: {error}");
+                        renderer = None;
+                        failed = true;
+                        ui.set_liquid_preview(slint::Image::default());
+                    }
                 }
             }
             _ => {}
@@ -87,6 +98,16 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
     });
     if let Err(error) = result {
         eprintln!("Liquid preview renderer unavailable: {error:?}");
+    }
+}
+
+fn read_liquid_glass(ui: &SettingsWindow) -> LiquidGlassSettings {
+    LiquidGlassSettings {
+        refraction: ui.get_liquid_refraction(),
+        depth: ui.get_liquid_depth(),
+        dispersion: ui.get_liquid_dispersion(),
+        frost: ui.get_liquid_frost(),
+        rim_light: ui.get_liquid_rim_light(),
     }
 }
 
@@ -148,6 +169,11 @@ pub fn populate(
     ui.set_launch_at_startup(s.launch_at_startup);
     ui.set_battery_previews(s.battery_previews);
     ui.set_tint(s.opacity);
+    ui.set_liquid_refraction(s.liquid_glass.refraction);
+    ui.set_liquid_depth(s.liquid_glass.depth);
+    ui.set_liquid_dispersion(s.liquid_glass.dispersion);
+    ui.set_liquid_frost(s.liquid_glass.frost);
+    ui.set_liquid_rim_light(s.liquid_glass.rim_light);
     ui.set_bounce_index(s.bounce.index());
     ui.set_contracted_width(s.contracted_width.round() as i32);
     ui.set_contracted_height(s.contracted_height.round() as i32);
@@ -222,6 +248,7 @@ pub fn read(ui: &SettingsWindow, old: &Settings, monitors: &[MonitorInfo]) -> Se
     s.island_scale = ui.get_island_scale_percent() as f64 / 100.;
     s.launch_at_startup = ui.get_launch_at_startup();
     s.opacity = ui.get_tint();
+    s.liquid_glass = read_liquid_glass(ui);
     s.bounce = Bounce::from_index(ui.get_bounce_index());
     s.contracted_width = ui.get_contracted_width() as f64;
     s.contracted_height = ui.get_contracted_height() as f64;

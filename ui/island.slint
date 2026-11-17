@@ -96,6 +96,7 @@ export component IslandWindow inherits Window {
     in property <float> shape-height: 32;
     in property <float> shape-radius: 16;
     in property <string> shape-path;
+    in property <string> glass-rim-path;
     in property <bool> form-notch: true;
     in property <float> shoulder: 8;
     pure callback wave-path(float, float, float, float) -> string;
@@ -228,8 +229,6 @@ export component IslandWindow inherits Window {
     in property <bool> liquid-dark-backdrop: false;
     private property <bool> light-material: root.appearance == 5 && root.has-glass-texture && !root.liquid-dark-backdrop;
     in property <string> material-name: "Solid";
-    private property <float> liquid-rim: island-pointer.pressed ? 0.30 : island-pointer.has-hover ? 0.62 : 0.44;
-    animate liquid-rim { duration: root.media-motion-enabled ? 120ms / root.animation-speed : 0ms; }
     in property <image> glass-texture;
     in property <bool> has-glass-texture: false;
     in property <bool> timer-alert: false;
@@ -333,9 +332,10 @@ export component IslandWindow inherits Window {
         // Shape rendering includes the concave shoulders. Contents stay in the
         // central body, where a normal rectangle clip is sufficient.
         if (root.appearance == 2 || root.appearance == 3 || root.appearance == 5) && root.has-glass-texture : Image {
-            x: root.gpu-material ? (parent.width - root.canvas-width * root.scaled-pixel) / 2 : -root.shoulder * root.scaled-pixel; y: 0px;
-            width: root.gpu-material ? root.canvas-width * root.scaled-pixel : parent.width + 2 * root.shoulder * root.scaled-pixel;
-            height: root.gpu-material ? root.canvas-height * root.scaled-pixel : parent.height;
+            private property <bool> canvas-texture: root.gpu-material && root.appearance != 5;
+            x: self.canvas-texture ? (parent.width - root.canvas-width * root.scaled-pixel) / 2 : -root.shoulder * root.scaled-pixel; y: 0px;
+            width: self.canvas-texture ? root.canvas-width * root.scaled-pixel : parent.width + 2 * root.shoulder * root.scaled-pixel;
+            height: self.canvas-texture ? root.canvas-height * root.scaled-pixel : parent.height;
             source: root.glass-texture; image-fit: fill;
         }
         Path {
@@ -355,7 +355,6 @@ export component IslandWindow inherits Window {
             viewbox-width: root.shape-width + 2 * root.shoulder;
             viewbox-height: root.shape-height;
             commands: root.shape-path;
-            stroke-width: root.scaled-pixel; stroke: root.appearance == 5 ? #ffffff.with-alpha(root.liquid-rim) : #ffffff32;
             fill: @linear-gradient(145deg, #ffffff16 0%, #ffffff00 42%, #ffffff08 100%);
         }
         if !root.form-notch : Rectangle {
@@ -366,8 +365,19 @@ export component IslandWindow inherits Window {
         if !root.form-notch && root.appearance == 3 : Rectangle {
             width: parent.width; height: parent.height;
             border-radius: root.shape-radius * root.scaled-pixel;
-            border-width: root.scaled-pixel; border-color: root.appearance == 5 ? #ffffff.with-alpha(root.liquid-rim) : #ffffff32;
-            background: @linear-gradient(145deg, (root.light-material ? #00000016 : #ffffff16) 0%, (root.light-material ? #00000000 : #ffffff00) 42%, (root.light-material ? #00000008 : #ffffff08) 100%);
+            background: @linear-gradient(145deg, #ffffff16 0%, #ffffff00 42%, #ffffff08 100%);
+        }
+        if root.appearance == 3 : Path {
+            x: root.form-notch ? -root.shoulder * root.scaled-pixel : root.scaled-pixel / 2;
+            y: root.form-notch ? 0px : root.scaled-pixel / 2;
+            width: root.form-notch ? parent.width + 2 * root.shoulder * root.scaled-pixel : parent.width - root.scaled-pixel;
+            height: root.form-notch ? parent.height : parent.height - root.scaled-pixel;
+            viewbox-x: 0; viewbox-y: 0; fit: fill;
+            viewbox-width: root.shape-width + 2 * root.shoulder;
+            viewbox-height: root.shape-height;
+            commands: root.glass-rim-path;
+            fill: transparent;
+            stroke-width: root.scaled-pixel; stroke: #ffffff32;
         }
         ChargingBackground { light-material: root.light-material;
             width: parent.width; height: parent.height;

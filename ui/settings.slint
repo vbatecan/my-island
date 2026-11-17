@@ -60,6 +60,11 @@ export component SettingsWindow inherits Window {
     in property <string> startup-status: "Launch at sign-in is not available for this installation.";
     in-out property <bool> battery-previews: true;
     in-out property <float> tint: 0.55;
+    in-out property <int> liquid-refraction;
+    in-out property <int> liquid-depth;
+    in-out property <int> liquid-dispersion;
+    in-out property <int> liquid-frost;
+    in-out property <int> liquid-rim-light;
     in-out property <int> bounce-index: 1;
     in-out property <bool> animations-enabled: true;
     in-out property <int> animation-speed-percent: 100;
@@ -144,7 +149,7 @@ export component SettingsWindow inherits Window {
                         commands: root.preview-path; fill: root.appearance-index == 5 ? transparent : root.appearance-index == 0 ? black : #000000.with-alpha(root.tint); stroke-width: 0px;
                     }
                     Text { x: preview-shape.x + 8px; y: max(0px, preview-shape.height / 2 - 12px); width: max(0px, preview-shape.width - 16px); height: 24px;
-                        text: root.preview-state == 0 ? "Still" : "Still Island"; color: root.appearance-index == 5 ? #202024 : white; font-size: (root.preview-state == 0 ? 13px : 18px) * preview-card.fit * root.text-scale-percent / 100;
+                        text: root.preview-state == 0 ? "Still" : "Still Island"; color: root.appearance-index == 5 && root.tint < 0.35 ? #202024 : white; font-size: (root.preview-state == 0 ? 13px : 18px) * preview-card.fit * root.text-scale-percent / 100;
                         overflow: elide; horizontal-alignment: center; vertical-alignment: center;
                     }
                     Text { x: 12px; y: parent.height - 20px; width: parent.width - 24px; height: 16px; font-size: 10px; color: #d0d0da;
@@ -200,6 +205,14 @@ export component SettingsWindow inherits Window {
                             Text { text: round(root.tint * 100) + "%"; color: #bcbcc7; horizontal-stretch: 1; horizontal-alignment: right; vertical-alignment: center; }
                         }
                         Slider { accessible-label: "Tint strength"; minimum: 0.15; maximum: 0.95; value <=> root.tint; changed => { root.changed(); } }
+                        if root.appearance-index == 5 : VerticalLayout {
+                            spacing: 6px;
+                            FieldRow { FieldLabel { text: "Refraction (%)"; } SpinBox { accessible-label: "Liquid Glass refraction percentage"; minimum: 0; maximum: 100; value <=> root.liquid-refraction; edited => { root.changed(); } } }
+                            FieldRow { FieldLabel { text: "Bevel depth (pixels)"; } SpinBox { accessible-label: "Liquid Glass bevel depth in logical pixels"; minimum: 1; maximum: 24; value <=> root.liquid-depth; edited => { root.changed(); } } }
+                            FieldRow { FieldLabel { text: "Color dispersion (%)"; } SpinBox { accessible-label: "Liquid Glass color dispersion percentage"; minimum: 0; maximum: 100; value <=> root.liquid-dispersion; edited => { root.changed(); } } }
+                            FieldRow { FieldLabel { text: "Frost (pixels)"; } SpinBox { accessible-label: "Liquid Glass frost radius in logical pixels"; minimum: 0; maximum: 24; value <=> root.liquid-frost; edited => { root.changed(); } } }
+                            FieldRow { FieldLabel { text: "Rim light (%)"; } SpinBox { accessible-label: "Liquid Glass rim light percentage"; minimum: 0; maximum: 100; value <=> root.liquid-rim-light; edited => { root.changed(); } } }
+                        }
                         Rule {}
                         Heading { text: "Motion"; }
                         CheckBox { text: "Enable animations"; checked <=> root.animations-enabled; toggled => { root.changed(); } }

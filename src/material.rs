@@ -4,6 +4,7 @@
 //! displaces backdrop samples and Schlick Fresnel supplies restrained rim reflection.
 use crate::shape::{FormFactor, ShapeContour};
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Backdrop {
@@ -22,7 +23,7 @@ pub struct Glass {
     revision: u64,
     source_size: (u32, u32),
     sample_y: f32,
-    pub liquid_backdrop: Option<Backdrop>,
+    pub liquid_backdrop: Option<Arc<Backdrop>>,
     pub liquid_revision: u64,
     pub palette: crate::liquid::Palette,
     cache: Option<(GlassCacheKey, Image)>,
@@ -59,7 +60,7 @@ impl Glass {
         {
             return false;
         }
-        self.liquid_backdrop = Some(frame);
+        self.liquid_backdrop = Some(Arc::new(frame));
         self.liquid_revision = self.liquid_revision.wrapping_add(1);
         true
     }
@@ -210,6 +211,8 @@ impl Glass {
         let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
         let left = (canvas_width * scale - w as f32) * 0.5;
         let bezel = (12. * scale).min(h as f32 * 0.46);
+        const F0: f32 = (0.45 / 2.45) * (0.45 / 2.45);
+        let flat_reflection = F0 * 0.55 + 0.61f32.powi(18) * 0.16;
         let output = buffer.make_mut_slice();
         for y in 0..h {
             for x in 0..w {
@@ -237,12 +240,7 @@ impl Glass {
                     // A flat center has normal(0,0,1), no displacement, and
                     // constant Fresnel/light terms. Only the optical rim needs
                     // Snell square roots and specular powers per pixel.
-                    (
-                        0.,
-                        0.,
-                        (((1.45f32 - 1.) / (1.45 + 1.)).powi(2) * 0.55 + 0.61f32.powi(18) * 0.16)
-                            * coverage,
-                    )
+                    (0., 0., flat_reflection * coverage)
                 } else {
                     let depth = (-d).max(0.);
                     let t = (depth / bezel).clamp(0.0001, 1.);
@@ -254,10 +252,13 @@ impl Glass {
                     let travel = 12. * scale;
                     let dx = ray[0] / (-ray[2]).max(0.05) * travel;
                     let dy = ray[1] / (-ray[2]).max(0.05) * travel;
-                    let f0 = ((1.45f32 - 1.) / (1.45 + 1.)).powi(2);
-                    let fresnel = f0 + (1. - f0) * (1. - normal[2]).powi(5);
+                    let fresnel = F0 + (1. - F0) * (1. - normal[2]).powi(5);
                     let light = (-0.45 * normal[0] - 0.65 * normal[1] + 0.61 * normal[2]).max(0.);
-                    let reflection = (fresnel * 0.55 + light.powi(18) * 0.16) * coverage;
+                    let bevel_reflection = fresnel * 0.55 + light.powi(18) * 0.16;
+                    // Match the GPU fade from the flat top edge into the side rims.
+                    let rim = (1. + n[1]).clamp(0., 1.);
+                    let reflection =
+                        (flat_reflection + (bevel_reflection - flat_reflection) * rim) * coverage;
                     (dx, dy, reflection)
                 };
                 let backdrop = &self.backdrop;
@@ -342,7 +343,7 @@ fn reduced_backdrop(frame: Backdrop) -> Option<Backdrop> {
 // Closed-form distances for the same axis-aligned contour. The generic shared
 // contour enumerates eight lines/arcs (with trigonometry) per pixel; the optical
 // renderer only needs the top shoulder or the lower rounded box at each point.
-fn lens_distance_normal(c: ShapeContour, x: f64, y: f64) -> (f64, [f64; 2]) {
+pub(crate) fn lens_distance_normal(c: ShapeContour, x: f64, y: f64) -> (f64, [f64; 2]) {
     let w = c.total_width();
     let h = c.height;
     let r = c.radius;
@@ -625,6 +626,22 @@ mod compositor_tests {
         let center = buffer.as_slice()[(24 * 220 + 110) as usize];
         assert_eq!(center.a, 255);
         assert!(center.r >= 100 && center.r < 150);
+    }
+
+    #[test]
+    fn glass_top_edge_has_no_highlight_on_a_uniform_backdrop() {
+        let mut glass = Glass::default();
+        glass.set_backdrop(canvas_backdrop([80, 80, 80, 255]));
+        for form in [FormFactor::Notch, FormFactor::Island] {
+            let buffer = glass.image(220., 48., 16., 1., form).to_rgba8().unwrap();
+            let width = buffer.width() as usize;
+            let pixels = buffer.as_slice();
+            let top = pixels[width / 2];
+            let center = pixels[24 * width + width / 2];
+            let bottom = pixels[47 * width + width / 2];
+            assert_eq!(top, center);
+            assert!(bottom.r > center.r);
+        }
     }
 
     #[test]

@@ -1,6 +1,38 @@
 use crate::navigation::Page;
 use crate::shape::FormFactor;
 use std::{fs, path::PathBuf};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiquidGlassSettings {
+    pub refraction: i32,
+    pub depth: i32,
+    pub dispersion: i32,
+    pub frost: i32,
+    pub rim_light: i32,
+}
+
+impl Default for LiquidGlassSettings {
+    fn default() -> Self {
+        Self {
+            refraction: 70,
+            depth: 8,
+            dispersion: 20,
+            frost: 2,
+            rim_light: 40,
+        }
+    }
+}
+
+impl LiquidGlassSettings {
+    fn normalize(&mut self) {
+        self.refraction = self.refraction.clamp(0, 100);
+        self.depth = self.depth.clamp(1, 24);
+        self.dispersion = self.dispersion.clamp(0, 100);
+        self.frost = self.frost.clamp(0, 24);
+        self.rim_light = self.rim_light.clamp(0, 100);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub selected_page: Option<Page>,
@@ -26,6 +58,7 @@ pub struct Settings {
     pub launch_at_startup: bool,
     pub battery_previews: bool,
     pub opacity: f32,
+    pub liquid_glass: LiquidGlassSettings,
     pub bounce: Bounce,
     pub follow_reduced_motion: bool,
     pub notifications_enabled: bool,
@@ -85,6 +118,7 @@ impl Default for Settings {
             launch_at_startup: false,
             battery_previews: true,
             opacity: 0.55,
+            liquid_glass: LiquidGlassSettings::default(),
             bounce: Bounce::Balanced,
             follow_reduced_motion: true,
             notifications_enabled: false,
@@ -114,6 +148,7 @@ impl Settings {
     /// Enforce supported values at every input boundary. The UI and INI parser
     /// share this policy so persisted settings cannot differ from live settings.
     pub fn normalize(&mut self) {
+        self.liquid_glass.normalize();
         self.launcher_shortcut = self.launcher_shortcut.min(2);
         let defaults = Self::default();
         if self
@@ -305,6 +340,21 @@ impl Settings {
                     }
                     "battery_previews" => s.battery_previews = v != "false",
                     "appearance" => s.appearance = Appearance::parse(v),
+                    "liquid_refraction" => {
+                        s.liquid_glass.refraction = v.parse().unwrap_or(s.liquid_glass.refraction);
+                    }
+                    "liquid_depth" => {
+                        s.liquid_glass.depth = v.parse().unwrap_or(s.liquid_glass.depth);
+                    }
+                    "liquid_dispersion" => {
+                        s.liquid_glass.dispersion = v.parse().unwrap_or(s.liquid_glass.dispersion);
+                    }
+                    "liquid_frost" => {
+                        s.liquid_glass.frost = v.parse().unwrap_or(s.liquid_glass.frost);
+                    }
+                    "liquid_rim_light" => {
+                        s.liquid_glass.rim_light = v.parse().unwrap_or(s.liquid_glass.rim_light);
+                    }
                     "opacity" => {
                         if let Ok(v) = v.parse::<f32>()
                             && v.is_finite()
@@ -408,6 +458,11 @@ impl Settings {
             text.push_str(&format!("selected_page={}\n", page.encode()));
         }
         text.push_str(&format!("text_scale={}\n", self.text_scale));
+        let optics = self.liquid_glass;
+        text.push_str(&format!(
+            "liquid_refraction={}\nliquid_depth={}\nliquid_dispersion={}\nliquid_frost={}\nliquid_rim_light={}\n",
+            optics.refraction, optics.depth, optics.dispersion, optics.frost, optics.rim_light
+        ));
         for name in executable_names(&self.fullscreen_always_hide.join(",")) {
             text.push_str(&format!("fullscreen_always_hide={name}\n"));
         }
@@ -568,6 +623,32 @@ impl Appearance {
 }
 #[cfg(test)]
 mod liquid_settings_tests {
+    #[test]
+    fn liquid_optics_keep_legacy_defaults_and_round_trip_with_bounds() {
+        use super::{LiquidGlassSettings, Settings};
+        let defaults = LiquidGlassSettings::default();
+        assert_eq!(
+            Settings::parse("appearance=liquid-glass\n").liquid_glass,
+            defaults
+        );
+        let settings = Settings::parse(
+            "liquid_refraction=103\nliquid_depth=-2\nliquid_dispersion=35\nliquid_frost=12\nliquid_rim_light=invalid\n",
+        );
+        assert_eq!(
+            settings.liquid_glass,
+            LiquidGlassSettings {
+                refraction: 100,
+                depth: 1,
+                dispersion: 35,
+                frost: 12,
+                rim_light: defaults.rim_light,
+            }
+        );
+        assert_eq!(
+            Settings::parse(&settings.encode()).liquid_glass,
+            settings.liquid_glass
+        );
+    }
     use super::*;
     #[test]
     fn liquid_selection_round_trips_without_changing_existing_indices() {

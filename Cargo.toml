@@ -2,7 +2,7 @@
 name = "still-island"
 version = "0.3.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.99"
 description = "A quiet native Windows island with interruptible spring motion"
 license = "MIT"
 
@@ -17,6 +17,9 @@ still-island-plugin-protocol = { path = "crates/plugin-protocol" }
 slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "raw-window-handle-06", "unstable-winit-030"] }
 raw-window-handle = "0.6"
 glow = "0.16"
+liquid-rust = "=0.2.6"
+pollster = "0.4"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "dx12", "vulkan"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62.2"

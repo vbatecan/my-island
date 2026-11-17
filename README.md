@@ -4,7 +4,7 @@ Folder activity is available in **Settings → Downloads**. Enable monitoring fo
 
 `--verify-downloads --isolated-material-probe --appearance=solid` runs an isolated real-watcher fixture and captures empty/active Downloads states without desktop input or changes to saved preferences.
 
-**Liquid Glass** is available in Settings → Appearance → Island material (`appearance=liquid-glass`). It preserves backdrop colors with a slight dark tint, adaptive foreground colors, and GPU-rendered blur and refractive edges. Capture runs at up to 60 updates per second while visible. `--verify-liquid --appearance=liquid-glass` captures deterministic material states and checks dark and saturated backdrop colors. See [Liquid Glass verification](LIQUID-GPU-VERIFICATION.md) for earlier measurements.
+**Liquid Glass** is available in Settings → Appearance → Island material (`appearance=liquid-glass`). Liquid Rust renders the backdrop's frost and refraction with wgpu. Still Island applies the configured dark tint and adapts the foreground colors to the backdrop. Capture runs at up to 60 updates per second while visible. `--verify-liquid --appearance=liquid-glass` captures deterministic material states and checks the top edge, tint, and backdrop colors. [Liquid Rust](https://github.com/al1h3n/liquid-rust) · [Earlier verification results](LIQUID-GPU-VERIFICATION.md)
 
 The launcher also searches Windows settings and tools (try `Bluetooth`, `uninstall programs`, or `Task Manager`). Type `(50 + 20) / 2` or `5 ft to cm` for local fend calculations, or `100 USD to SGD` for currency conversion. A selected answer copies with Enter and contracts the notch. Currency uses Frankfurter reference rates cached for six hours; only the currency pair is sent, never the amount. Settings → Behavior contains independent provider toggles. Expressions are not saved.
 
@@ -98,7 +98,7 @@ Development checks: `--verify-notifications` uses synthetic records and never as
 
 Distributed installer and portable builds can download GitHub updates automatically. Open **Settings → Updates** to check manually, opt out, or choose **Update and restart**. The first updater-enabled release needs a manual installation. MSIX updates remain manual. See [automatic release and update details](AUTO-UPDATE.md).
 
-Install stable Rust (MSVC) and Visual Studio Build Tools with Desktop development with C++ and the Windows SDK. Minimum Rust1.92; built here with1.99.1, Slint1.18.1, windows0.62.2.
+Install Rust 1.99 or later (MSVC) and Visual Studio Build Tools with Desktop development with C++ and the Windows SDK.
 
 ```powershell
 cargo run --release

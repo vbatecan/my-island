@@ -6,7 +6,9 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let weak = Rc::downgrade(app);
     let ui_weak = ui.as_weak();
     let mut renderer: Option<crate::liquid::Renderer> = None;
-    let mut sampled = None;
+    let mut liquid = None;
+    let mut liquid_failed = false;
+    let mut liquid_sampled = None;
     let mut failed = false;
     let result = ui.window().set_rendering_notifier(move |state, api| {
         if matches!(state, slint::RenderingState::RenderingTeardown) {
@@ -17,6 +19,7 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
             }
             // SAFETY: the image is cleared and teardown owns the current context.
             unsafe { release_renderer(&mut renderer); }
+            liquid = None;
             return;
         }
         let Some(ui) = ui_weak.upgrade() else { return };
@@ -25,13 +28,39 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
         match state {
             slint::RenderingState::RenderingSetup => {
                 failed = false;
-                sampled = None;
+                liquid_failed = false;
+                liquid_sampled = None;
             }
             slint::RenderingState::BeforeRendering => {
                 use crate::liquid::Optics;
 
                 let a = app.borrow();
                 let appearance = a.settings.appearance;
+                if appearance == Appearance::LiquidGlass {
+                    failed = false;
+                    if renderer.is_some() {
+                        clear_image(&ui);
+                        // SAFETY: the GL image is detached and the context is current.
+                        unsafe { release_renderer(&mut renderer); }
+                    }
+                    if !a.hidden && !liquid_failed {
+                        let result = render_liquid(&a, &ui, &mut liquid, &mut liquid_sampled);
+                        drop(a);
+                        if let Err(error) = result {
+                            liquid = None;
+                            liquid_failed = true;
+                            clear_image(&ui);
+                            record(&format!("Liquid Rust rendering failed: {error}"));
+                            status(&app, "Liquid Glass graphics unavailable. Update the graphics driver and try again.");
+                        }
+                    }
+                    return;
+                }
+                if liquid.take().is_some() {
+                    clear_image(&ui);
+                }
+                liquid_failed = false;
+                liquid_sampled = None;
                 let optics = match appearance {
                     Appearance::Acrylic
                         if !(a.verification && verification::has_arg("--cpu-acrylic")) =>
@@ -39,7 +68,6 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                         Some(Optics::Acrylic)
                     }
                     Appearance::Glass | Appearance::LiveGlass => Some(Optics::Glass),
-                    Appearance::LiquidGlass => Some(Optics::Liquid),
                     _ => None,
                 };
                 let Some(optics) = optics else {
@@ -52,18 +80,13 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                     }
                     // SAFETY: this notifier owns the context and detached the image.
                     unsafe { release_renderer(&mut renderer); }
-                    sampled = None;
                     failed = false;
                     return;
                 };
                 if a.hidden || failed {
                     return;
                 }
-                let liquid = optics == Optics::Liquid;
-                let has_backdrop = {
-                    let glass = a.glass.borrow();
-                    if liquid { glass.liquid_backdrop.is_some() } else { glass.backdrop.is_some() }
-                };
+                let has_backdrop = a.glass.borrow().backdrop.is_some();
                 drop(a);
                 if !has_backdrop {
                     return;
@@ -75,9 +98,6 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                         Err(error) => {
                             record(&format!("Material GPU setup failed: {error}"));
                             failed = true;
-                            if liquid {
-                                status(&app, "Liquid Glass graphics unavailable. Update the graphics driver and try again.");
-                            }
                             return;
                         }
                     }
@@ -86,31 +106,16 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                     let a = app.borrow();
                     let Some(gpu) = renderer.as_mut() else { return };
                     let contour = crate::shape::ShapeContour::new(a.springs[0].position,a.springs[1].position,a.springs[2].position,a.settings.form_factor);
-                    let mut glass = a.glass.borrow_mut();
-                    let revision = if liquid { glass.liquid_revision } else { glass.backdrop_revision() };
-                    let sample_key=(revision,a.settings.opacity.to_bits());
-                    if liquid && sampled != Some(sample_key) {
-                        let Glass { liquid_backdrop, palette, .. } = &mut *glass;
-                        if let Some(frame) = liquid_backdrop {
-                            let sx=frame.width as f32/a.canvas_size.0 as f32;
-                            let sy=frame.height as f32/a.canvas_size.1 as f32;
-                            let left=(a.canvas_size.0 as f32-contour.width as f32)*0.5;
-                            palette.sample(frame,[(left+14.)*sx,8.*sy,(left+contour.width as f32-14.)*sx,(contour.height as f32-8.).max(9.)*sy],Instant::now(),a.settings.opacity);
-                        }
-                        sampled = Some(sample_key);
-                    }
-                    if liquid { ui.set_liquid_dark_backdrop(glass.palette.dark); }
+                    let glass = a.glass.borrow();
                     let mut geometry = crate::liquid::Geometry::new(
                         [a.canvas_size.0 as f32, a.canvas_size.1 as f32],
                         contour,
                         ui.window().scale_factor() * a.settings.island_scale as f32,
-                        if liquid { a.settings.opacity } else { 0. },
-                        liquid && glass.palette.dark,
                     );
                     geometry.optics = optics;
                     geometry.sample_y = a.slide.position as f32;
-                    match if liquid { glass.liquid_backdrop.as_ref() } else { glass.backdrop.as_ref() } {
-                        Some(frame) => gpu.render(frame, revision, geometry, liquid && glass.palette.mixed),
+                    match glass.backdrop.as_ref() {
+                        Some(frame) => gpu.render(frame, glass.backdrop_revision(), geometry),
                         None => Ok(None),
                     }
                 };
@@ -128,11 +133,7 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                         unsafe { release_renderer(&mut renderer); }
                         record(&format!("Material GPU rendering failed: {error}"));
                         failed = true;
-                        if liquid {
-                            status(&app, "Liquid Glass graphics interrupted. Restart Still Island to retry.");
-                        } else {
-                            app.borrow().render();
-                        }
+                        app.borrow().render();
                     }
                 }
             }
@@ -142,6 +143,77 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     if let Err(error) = result {
         record(&format!("Material renderer unavailable: {error:?}"));
     }
+}
+
+fn clear_image(ui: &IslandWindow) {
+    ui.set_gpu_material(false);
+    ui.set_glass_texture(slint::Image::default());
+    ui.set_has_glass_texture(false);
+}
+
+fn render_liquid(
+    app: &App,
+    ui: &IslandWindow,
+    worker: &mut Option<crate::liquid_rust_renderer::Worker>,
+    sampled: &mut Option<(u64, u32)>,
+) -> Result<(), String> {
+    use crate::liquid_rust_renderer::{Layout, Worker};
+    let mut glass = app.glass.borrow_mut();
+    let Some(backdrop) = glass.liquid_backdrop.clone() else {
+        return Ok(());
+    };
+    let revision = glass.liquid_revision;
+    let tint = app.settings.opacity;
+    let canvas = [app.canvas_size.0 as f32, app.canvas_size.1 as f32];
+    let contour = crate::shape::ShapeContour::new(
+        app.springs[0].position,
+        app.springs[1].position,
+        app.springs[2].position,
+        app.settings.form_factor,
+    );
+    let sample_key = (revision, tint.to_bits());
+    if *sampled != Some(sample_key) {
+        let sx = backdrop.width as f32 / canvas[0];
+        let sy = backdrop.height as f32 / canvas[1];
+        let left = (canvas[0] - contour.width as f32) / 2.;
+        glass.palette.sample(
+            &backdrop,
+            [
+                (left + 14.) * sx,
+                8. * sy,
+                (left + contour.width as f32 - 14.) * sx,
+                (contour.height as f32 - 8.).max(9.) * sy,
+            ],
+            Instant::now(),
+            tint,
+        );
+        *sampled = Some(sample_key);
+    }
+    if worker.is_none() {
+        let weak = ui.as_weak();
+        *worker = Some(Worker::start(move || {
+            let _ = weak.upgrade_in_event_loop(|ui| ui.window().request_redraw());
+        })?);
+    }
+    let layout = Layout {
+        canvas,
+        contour,
+        scale: ui.window().scale_factor() * app.settings.island_scale as f32,
+        tint,
+        optics: app.settings.liquid_glass,
+        sample_y: app.slide.position as f32,
+    };
+    if let Some(image) = worker
+        .as_mut()
+        .unwrap()
+        .update(&backdrop, revision, layout)?
+    {
+        ui.set_liquid_dark_backdrop(glass.palette.dark);
+        ui.set_gpu_material(true);
+        ui.set_glass_texture(image);
+        ui.set_has_glass_texture(true);
+    }
+    Ok(())
 }
 
 /// Call with the renderer's GL context current and its borrowed image detached.

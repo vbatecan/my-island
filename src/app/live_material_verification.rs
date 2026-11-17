@@ -197,7 +197,7 @@ fn await_capture(app: &Rc<RefCell<App>>, mut run: Run) {
             let app = app.borrow();
             let glass = app.glass.borrow();
             let (frame, revision) = if run.appearance == Appearance::LiquidGlass {
-                (glass.liquid_backdrop.as_ref(), glass.liquid_revision)
+                (glass.liquid_backdrop.as_deref(), glass.liquid_revision)
             } else {
                 (glass.backdrop.as_ref(), glass.backdrop_revision())
             };
@@ -238,6 +238,25 @@ fn await_capture(app: &Rc<RefCell<App>>, mut run: Run) {
             finish(Err("could not read the rendered overlay pixel".into()));
             return;
         };
+        if run.appearance == Appearance::LiquidGlass {
+            // Capture and the offscreen renderer publish independently.
+            let difference = i16::from(rendered[0]) - i16::from(rendered[2]);
+            let rendered_expected = if run.warm.is_some() {
+                difference <= -8
+            } else {
+                difference >= 8
+            };
+            if !rendered_expected {
+                if run.repainted.elapsed() >= Duration::from_secs(6) {
+                    finish(Err(format!(
+                        "Liquid Glass rendered {rendered:?} after capture delivered {expected:?}"
+                    )));
+                } else {
+                    await_capture(&app, run);
+                }
+                return;
+            }
+        }
         let snapshot_name = if run.warm.is_some() {
             "live-material-cool"
         } else {

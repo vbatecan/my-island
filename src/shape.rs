@@ -27,7 +27,7 @@ impl FormFactor {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapeContour {
     pub width: f64,
     pub height: f64,
@@ -204,13 +204,26 @@ impl ShapeContour {
         points
     }
     pub fn svg_commands(self) -> String {
+        self.svg_contour(true)
+    }
+
+    pub fn svg_rim_commands(self) -> String {
+        self.svg_contour(false)
+    }
+
+    fn svg_contour(self, closed: bool) -> String {
         use std::fmt::Write;
         let mut out = String::new();
-        for edge in self.edges() {
+        for (index, edge) in self.edges().into_iter().enumerate() {
             match edge {
                 Edge::Line(a, b) => {
-                    if out.is_empty() {
+                    // The first segment is the flat top. Start after it for an open rim.
+                    if index == 0 {
+                        let a = if closed { a } else { b };
                         let _ = write!(out, "M {} {} ", a[0], a[1]);
+                        if !closed {
+                            continue;
+                        }
                     }
                     let _ = write!(out, "L {} {} ", b[0], b[1]);
                 }
@@ -230,7 +243,9 @@ impl ShapeContour {
                 }
             }
         }
-        out.push('Z');
+        if closed {
+            out.push('Z');
+        }
         out
     }
 }

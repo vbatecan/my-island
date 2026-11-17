@@ -38,7 +38,7 @@ try {
  $lines=Get-Content -LiteralPath (Join-Path $run 'verification.log')
  $lines|Write-Output
  $completion = if ($LiveAppearance) { 'live material verification complete' } else { 'liquid verification complete' }
- if(($lines -match 'FAILED|GPU setup failed|GPU rendering failed') -or -not ($lines -match $completion)){throw "Material fixture failed. Evidence: $run"}
+ if(($lines -cmatch 'FAILED|GPU setup failed|GPU rendering failed|Liquid Rust rendering failed') -or -not ($lines -match $completion)){throw "Material fixture failed. Evidence: $run"}
  Write-Output "Evidence: $run"
 } finally {
  if(-not $application.HasExited){$application.Kill()}

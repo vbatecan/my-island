@@ -1,17 +1,11 @@
 #version 330 core
-uniform int optics; // Liquid, Acrylic, Glass
+uniform int optics; // Acrylic or Glass
 uniform sampler2D backdrop;
-uniform sampler2D blurred;
 uniform vec2 canvas;
 uniform vec2 target_size;
 uniform vec4 shape; // total width, height, radius, shoulder
-uniform float tint;
 uniform float sample_y;
-uniform float support; // +1 for dark text, -1 for light text
-uniform int pass;
 out vec4 color;
-vec3 linearize(vec3 c) { return mix(c / 12.92, pow((c + .055) / 1.055, vec3(2.4)), step(vec3(.04045), c)); }
-vec3 encode(vec3 c) { return mix(c * 12.92, 1.055 * pow(max(c, vec3(0)), vec3(1.0/2.4)) - .055, step(vec3(.0031308), c)); }
 bool inside(vec2 p) {
     float w=shape.x, h=shape.y, r=shape.z, s=shape.w;
     if(p.x<0. || p.y<0. || p.x>w || p.y>h) return false;
@@ -50,15 +44,6 @@ vec3 distance_normal(vec2 p) {
 void main() {
     // Texture row zero corresponds to the top of the canvas throughout this pipeline.
     vec2 uv=gl_FragCoord.xy/target_size;
-    if(pass==1 || pass==2) {
-        vec2 axis=(pass==1?vec2(1,0):vec2(0,1))*1.5/canvas;
-        vec3 c=vec3(0);
-        for(int i=-2;i<=2;i++) {
-            float weight=i==0?.375:(abs(i)==1?.25:.0625);
-            c+=weight*linearize(texture(backdrop,uv+float(i)*axis).rgb);
-        }
-        color=vec4(encode(c),1); return;
-    }
     vec2 logical=uv*canvas;
     vec2 p=logical-vec2((canvas.x-shape.x)*.5,0);
     // Most of the persistent canvas is transparent, especially when compact.
@@ -73,55 +58,24 @@ void main() {
     // contour mask changes during the morph; no CPU rasterization or readback.
     if(optics==1) { color=vec4(texture(backdrop,backdrop_uv).rgb,coverage); return; }
     float depth=max(-dn.x,0.);
-    if(optics==2) {
-        // The original glass bevel, now sampled in the renderer rather than
-        // rasterized on the UI thread for every spring position.
-        float bezel=min(12.,shape.y*.46);
-        const float f0=(.45/2.45)*(.45/2.45);
-        float reflection=f0*.55+pow(.61,18.)*.16;
-        vec2 refracted=backdrop_uv;
-        if(depth<bezel) {
-            float t=clamp(depth/bezel,.0001,1.);
-            float arc=sqrt(1.-(1.-t)*(1.-t));
-            float slope=min(8.,8.*(1.-t)/(bezel*arc));
-            vec3 normal=normalize(vec3(dn.yz*slope,1.));
-            vec3 ray=refract(vec3(0.,0.,-1.),normal,1./1.45);
-            refracted+=ray.xy*(12./max(-ray.z,.05))/canvas;
-            float fresnel=f0+(1.-f0)*pow(1.-normal.z,5.);
-            float light=max(dot(normal,vec3(-.45,-.65,.61)),0.);
-            reflection=fresnel*.55+pow(light,18.)*.16;
-        }
-        color=vec4(mix(texture(backdrop,refracted).rgb,vec3(1.),reflection*coverage),coverage);
-        return;
+    // Fade the bevel lighting to zero at the upward-facing edge.
+    float rim=clamp(1.+dn.z,0.,1.);
+    float bezel=min(12.,shape.y*.46);
+    const float f0=(.45/2.45)*(.45/2.45);
+    float reflection=f0*.55+pow(.61,18.)*.16;
+    vec2 refracted=backdrop_uv;
+    if(depth<bezel) {
+        float t=clamp(depth/bezel,.0001,1.);
+        float arc=sqrt(1.-(1.-t)*(1.-t));
+        float slope=min(8.,8.*(1.-t)/(bezel*arc));
+        vec3 normal=normalize(vec3(dn.yz*slope,1.));
+        vec3 ray=refract(vec3(0.,0.,-1.),normal,1./1.45);
+        refracted+=ray.xy*(12./max(-ray.z,.05))/canvas;
+        float fresnel=f0+(1.-f0)*pow(1.-normal.z,5.);
+        float light=max(dot(normal,vec3(-.45,-.65,.61)),0.);
+        reflection=mix(reflection,fresnel*.55+pow(light,18.)*.16,rim);
     }
-    // Convex superellipse cross section: finite slope and a smooth flat centre.
-    float t=clamp(1.-depth/8.,0.,.999);
-    float slope=min(8.,pow(t,3.)/pow(max(1.-pow(t,4.),.001),.75));
-    vec3 n=normalize(vec3(dn.yz*slope,1));
-    vec3 ray=refract(vec3(0,0,-1),n,1./1.5);
-    vec2 displacement=ray.xy*(6./max(-ray.z,.15));
-    float len=length(displacement);
-    displacement*=min(1.,6./max(len,1e-6));
-    vec2 refracted=backdrop_uv+displacement/canvas;
-    vec3 c=mix(linearize(texture(backdrop,refracted).rgb),linearize(texture(blurred,refracted).rgb),.35);
-    // Match the black-opacity control in display space, retaining backdrop hue.
-    // Tint the transmitted light before adding the curved bezel reflection.
-    c=linearize(encode(c)*(1.-clamp(tint,0.,1.)));
-    float fresnel=.04+.96*pow(1.-n.z,5.);
-    float edge=1.-smoothstep(0.,8.,depth);
-    float directional=max(dot(n,normalize(vec3(-.45,-.65,1))),0.);
-    // Reflection stays on the curved bezel; the flat centre retains its hue.
-    float glint=exp(-depth/1.1)*pow(directional,4.);
-    c=mix(c,vec3(.85,.91,1),edge*(fresnel*.25+glint*.16));
-    c*=1.-.075*exp(-pow((depth-2.5)/1.4,2.));
-    // Feathered support is restricted to the content inset, never the entire panel.
-    vec2 inset=min(p-vec2(shape.w+14.,8.),vec2(shape.x-shape.w-14.,shape.y-8.)-p);
-    float local=smoothstep(0.,12.,min(inset.x,inset.y));
-    float lum=dot(c,vec3(.2126,.7152,.0722));
-    float need=support>0.?1.-smoothstep(.20,.55,lum):smoothstep(.20,.55,lum);
-    // Never bleach the backdrop to support dark text.
-    c*=1.-(support<0.?.15*local*need:0.);
     // Slint 1.18's borrowed-texture importer expects straight RGBA and
     // premultiplies at sampling. Coverage is applied exactly once there.
-    color=vec4(encode(clamp(c,0.,1.)),coverage);
+    color=vec4(mix(texture(backdrop,refracted).rgb,vec3(1.),reflection*coverage),coverage);
 }

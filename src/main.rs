@@ -8,6 +8,7 @@ mod launcher;
 mod launcher_actions;
 mod launcher_answers;
 mod liquid;
+mod liquid_rust_renderer;
 mod material;
 mod metrics;
 mod navigation;

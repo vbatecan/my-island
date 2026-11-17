@@ -407,22 +407,26 @@ impl App {
         let radius = self.springs[2].position;
         let form = self.settings.form_factor;
         let notch = form == crate::shape::FormFactor::Notch;
+        let appearance = self.settings.appearance;
+        let glass = matches!(appearance, Appearance::Glass | Appearance::LiveGlass);
         if ui.get_shape_width() != width as f32
             || ui.get_shape_height() != height as f32
             || ui.get_shape_radius() != radius as f32
             || ui.get_form_notch() != notch
             || (notch && ui.get_shape_path().is_empty())
+            || (glass && ui.get_appearance() != Appearance::Glass as i32)
         {
             ui.set_shape_width(width as f32);
             ui.set_shape_height(height as f32);
             ui.set_shape_radius(radius as f32);
             ui.set_form_notch(notch);
+            let contour = crate::shape::ShapeContour::new(width, height, radius, form);
+            ui.set_shoulder(contour.shoulder() as f32);
             if notch {
-                let contour = crate::shape::ShapeContour::new(width, height, radius, form);
-                ui.set_shoulder(contour.shoulder() as f32);
                 ui.set_shape_path(contour.svg_commands().into());
-            } else {
-                ui.set_shoulder(0.);
+            }
+            if glass {
+                ui.set_glass_rim_path(contour.svg_rim_commands().into());
             }
         }
         let reveal = self.springs[3].position.clamp(0.0, 1.0) * expanded_space(width, height);
@@ -431,7 +435,6 @@ impl App {
             (self.springs[4].position.clamp(0.0, 1.0) * compact_space(width, height)) as f32,
         );
         ui.set_content_shift((8.0 * (1.0 - reveal)) as f32);
-        let appearance = self.settings.appearance;
         ui.set_appearance(if appearance == Appearance::LiveGlass {
             Appearance::Glass as i32
         } else {
