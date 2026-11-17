@@ -798,7 +798,7 @@ mod http {
             let agent: Vec<u16> = concat!(
                 "StillIsland/",
                 env!("CARGO_PKG_VERSION"),
-                " (https://github.com/vbatecan/my-island)"
+                " (https://github.com/vbatecan/still-island)"
             )
             .encode_utf16()
             .chain(Some(0))

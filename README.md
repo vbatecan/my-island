@@ -189,7 +189,7 @@ The original source is MIT licensed. Dependencies retain their own licenses, inc
 
 The application does not currently check GitHub for updates or install them automatically. Download a newer release manually and run its Setup installer to upgrade an existing installation, or replace the portable executable after exiting the app. GitHub Actions automates release publishing, not updates on users' computers.
 
-Repository: https://github.com/vbatecan/my-island (private).
+Repository: https://github.com/vbatecan/still-island (private).
 
 Pull requests and pushes to main run formatting, type checks, Clippy,40unit tests, and release-tool tests. Workflows and compiler downloads are pinned; workflow definitions are validated with actionlint.
 

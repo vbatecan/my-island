@@ -15,12 +15,12 @@ try {
     if($Operation -eq 'Check') {
         $work=Join-Path $root ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $work | Out-Null
-        Fetch 'https://api.github.com/repos/vbatecan/my-island/releases/latest' "$work/release.json" 2097152
+        Fetch 'https://api.github.com/repos/vbatecan/still-island/releases/latest' "$work/release.json" 2097152
         $release=Get-Content "$work/release.json" -Raw | ConvertFrom-Json
         if($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'){throw 'No compatible update is available.'}
         $version=$release.tag_name.Substring(1)
         if([version]$version -le [version]$CurrentVersion){'Current';exit 0}
-        $base="https://github.com/vbatecan/my-island/releases/download/v$version"
+        $base="https://github.com/vbatecan/still-island/releases/download/v$version"
         Fetch "$base/release-manifest.json" "$work/manifest.json" 1048576
         $manifest=Get-Content "$work/manifest.json" -Raw | ConvertFrom-Json
         $existingSignature=Get-AuthenticodeSignature -LiteralPath $Executable

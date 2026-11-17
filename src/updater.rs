@@ -250,7 +250,7 @@ impl Updater {
             }
             UpdateMode::Packaged => {
                 let _ = Command::new("explorer.exe")
-                    .arg("https://github.com/vbatecan/my-island/releases/latest")
+                    .arg("https://github.com/vbatecan/still-island/releases/latest")
                     .spawn();
                 return;
             }

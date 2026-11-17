@@ -1,6 +1,6 @@
 # Windows releases
 
-The private repository is [vbatecan/my-island](https://github.com/vbatecan/my-island). The workflows are `windows-ci.yml` (Windows checks/builds), `workflow-lint.yml` (workflow validation), and `windows-release.yml` (tagged Windows release artifacts). Review their results in GitHub Actions before distributing a build. These files define Windows x64 support; Linux packaging is deferred because the application currently uses Windows-only platform modules.
+The private repository is [vbatecan/still-island](https://github.com/vbatecan/still-island). The workflows are `windows-ci.yml` (Windows checks/builds), `workflow-lint.yml` (workflow validation), and `windows-release.yml` (tagged Windows release artifacts). Review their results in GitHub Actions before distributing a build. These files define Windows x64 support; Linux packaging is deferred because the application currently uses Windows-only platform modules.
 
 Keep `Cargo.toml` and `Cargo.lock` consistent, commit the intended release, and use a stable tag matching the package version. The initial version is **0.2.0**, so the matching tag is **v0.2.0** and the MSIX identity version is **0.2.0.0**. `scripts/release-version.ps1` validates the exact tag and reads only the package version; it never edits files or creates a tag. Prerelease/build suffixes, leading zeros, and version components exceeding 65535 are rejected. The workflow outputs are `version` and `msix_version`.
 
