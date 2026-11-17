@@ -182,7 +182,7 @@ impl Glass {
             1.
         };
         let canvas_width = if canvas_width.is_finite() {
-            canvas_width.clamp(crate::state::OVERLAY_WIDTH, 4096.) as f32
+            canvas_width.max(crate::state::OVERLAY_WIDTH) as f32
         } else {
             crate::state::OVERLAY_WIDTH as f32
         };

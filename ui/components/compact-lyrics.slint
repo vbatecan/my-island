@@ -1,0 +1,63 @@
+// Compact playback visuals; lookup and timeline selection remain in Rust.
+export component CompactLyric inherits Rectangle {
+    in property <string> text;
+    in property <float> ui-scale: 1;
+    in property <float> text-scale: 1;
+    in property <color> ink: white;
+    in property <bool> active;
+    in property <bool> motion-enabled;
+    in property <float> motion-speed: 1;
+    private property <float> elapsed: 0;
+    out property <length> offset: 0px;
+    out property <bool> overflowing: line.preferred-width > root.width;
+    out property <length> natural-width: line.preferred-width;
+    clip: true;
+    changed text => { self.elapsed = 0; self.offset = 0px; }
+    changed overflowing => { if !self.overflowing { self.offset = 0px; } }
+    changed motion-enabled => { if !self.motion-enabled { self.offset = 0px; } }
+    Timer {
+        interval: 33ms;
+        running: root.visible && root.active && (root.overflowing || root.elapsed < 700);
+        triggered => {
+            root.elapsed += 33 * root.motion-speed;
+            if root.overflowing && root.elapsed > 700 {
+                root.offset = mod(root.offset + 0.924px * root.ui-scale * root.motion-speed, line.preferred-width + 24px * root.ui-scale);
+            }
+        }
+    }
+    line := Text {
+        x: -root.offset; width: root.motion-enabled && root.overflowing ? self.preferred-width : root.width; height: parent.height;
+        text: root.text; color: root.ink; font-size: 13px * root.ui-scale * root.text-scale;
+        font-family: "Bahnschrift"; font-weight: 400; vertical-alignment: center; overflow: elide;
+        opacity: root.active ? min(1, root.elapsed / 180) : 1;
+    }
+    if root.overflowing && root.motion-enabled : Text {
+        x: line.preferred-width + 24px * root.ui-scale - root.offset; width: line.preferred-width; height: parent.height;
+        text: root.text; color: line.color; font-size: line.font-size;
+        font-family: line.font-family; font-weight: line.font-weight; vertical-alignment: center;
+    }
+}
+
+export component PlaybackWave inherits Rectangle {
+    in property <float> ui-scale: 1;
+    in property <color> ink: white;
+    in property <bool> active;
+    in property <bool> playing;
+    in property <bool> enabled: true;
+    in property <float> motion-speed: 1;
+    private property <float> phase: 0;
+    callback clicked();
+    callback interaction(bool);
+    Timer { interval: 33ms; running: root.visible && root.active; triggered => { root.phase = mod(root.phase + 0.18 * root.motion-speed, 6.283185); } }
+    for i in 5 : Rectangle {
+        x: (6 + i * 4) * 1px * root.ui-scale; width: 2px * root.ui-scale;
+        height: (5 + 10 * abs(sin((root.phase + i * 0.8) * 1rad))) * 1px * root.ui-scale;
+        y: (parent.height - self.height) / 2; border-radius: 1px * root.ui-scale; background: root.ink;
+    }
+    TouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        accessible-role: button; accessible-label: root.playing ? "Pause playback" : "Play";
+        changed pressed => { root.interaction(self.pressed); }
+        clicked => { root.clicked(); }
+    }
+}

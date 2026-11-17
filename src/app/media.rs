@@ -209,7 +209,7 @@ pub(super) fn sync_media_clock(app: &Rc<RefCell<App>>) {
                 && a.ui.upgrade().is_some_and(|ui| {
                     ui.get_media_available() && ui.get_playing() && ui.get_duration_seconds() > 0.
                 }),
-            compact,
+            compact && !a.ui.upgrade().is_some_and(|ui| ui.get_lyrics_synced()),
         )
     };
     if !active {
@@ -237,7 +237,7 @@ pub(super) fn sync_media_clock(app: &Rc<RefCell<App>>) {
                         0.
                     });
                     ui.set_elapsed_label(time_label(position).into());
-                    if a.state == IslandState::Media {
+                    if a.state == IslandState::Media || ui.get_compact_media() {
                         lyrics::update_position(&mut a, &ui, position);
                     }
                 }

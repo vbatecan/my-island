@@ -72,6 +72,10 @@ fn cursor(ui: &IslandWindow, position: f64, playing: bool) {
 }
 
 pub(super) fn setup(app: &Rc<RefCell<App>>) {
+    if verification::has_arg("--verify-compact-lyrics") {
+        setup_compact(app);
+        return;
+    }
     // Observe an actual in-flight Slint animation, then interrupt it twice.
     // The seven row identities remain fixed while the numeric cursor retargets.
     let weak = Rc::downgrade(app);
@@ -188,7 +192,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     let expected = app.borrow().geometry(IslandState::Media);
                     check(
                         (f64::from(ui.get_shape_width()) - expected.width).abs() < 0.5
-                            && (ui.get_shape_height() - 216.).abs() < 0.5
+                            && (ui.get_shape_height() - expected.height as f32).abs() < 0.5
                             && (ui.get_shape_radius() - 8.).abs() < 0.25,
                         "wide media geometry and default eight pixel corners",
                     );
@@ -437,6 +441,109 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                         a.frames,
                         a.timer.running()
                     ));
+                    let _ = slint::quit_event_loop();
+                }
+            }
+        });
+    }
+}
+
+fn setup_compact(app: &Rc<RefCell<App>>) {
+    let saved_offset = Rc::new(std::cell::Cell::new(0.));
+    for (step, delay) in [200, 5000, 5800, 7000, 7800, 8400, 9000]
+        .into_iter()
+        .enumerate()
+    {
+        let weak = Rc::downgrade(app);
+        let saved_offset = saved_offset.clone();
+        slint::Timer::single_shot(Duration::from_millis(delay), move || {
+            let Some(app) = weak.upgrade() else { return };
+            let Some(ui) = app.borrow().ui.upgrade() else {
+                return;
+            };
+            match step {
+                0 => {
+                    let mut settings = app.borrow().settings.clone();
+                    settings.selected_page = Some(crate::navigation::Page::Media);
+                    settings.online_lyrics = true;
+                    settings.compact_now_playing = true;
+                    settings.animations = true;
+                    settings.follow_reduced_motion = false;
+                    settings.appearance = Appearance::Solid;
+                    apply_settings(&app, settings, false);
+                    ui.set_media_available(true);
+                    ui.set_track_title("Windowlight".into());
+                    ui.set_artist_name("Still Island Studio".into());
+                    ui.set_duration_seconds(180.);
+                    cursor(&ui, 0., true);
+                    let track =
+                        TrackKey::new("Windowlight", "Still Island Studio", "", 180.).unwrap();
+                    let generation = lyrics::verification_begin(&app, track.clone());
+                    lyrics::verification_receive(&app, LyricsEvent {
+                        generation, track,
+                        status: LyricsStatus::Found(Arc::new(LyricsContent::Synced(vec![
+                            LyricsLine { timestamp_seconds: 0., text: "We carry little pools of light through all the quiet streets tonight ".repeat(12) },
+                            LyricsLine { timestamp_seconds: 10., text: "We carry little pools of light through all the quiet streets tonight".into() },
+                            LyricsLine { timestamp_seconds: 20., text: "Stay here".into() },
+                        ]))),
+                    });
+                }
+                1 => {
+                    check(
+                        ui.get_compact_media() && ui.get_lyrics_synced(),
+                        "compact accepts timed lyric response",
+                    );
+                    check(
+                        ui.get_compact_lyric_overflow() && ui.get_compact_lyric_offset() > 0.,
+                        "long compact lyric scrolls after initial dwell",
+                    );
+                    capture(&ui, "lyrics-compact-scrolling");
+                    cursor(&ui, 2., false);
+                    saved_offset.set(ui.get_compact_lyric_offset());
+                }
+                2 => {
+                    check(
+                        (ui.get_compact_lyric_offset() - saved_offset.get()).abs() < 0.1,
+                        "pause freezes compact scrolling",
+                    );
+                    cursor(&ui, 11., false);
+                }
+                3 => {
+                    check(
+                        ui.get_shape_width() > 320. && !ui.get_compact_lyric_overflow(),
+                        "full lyric fits beyond former compact width",
+                    );
+                    check(
+                        ui.get_compact_lyric_offset() == 0.,
+                        "fitting lyric resets scrolling",
+                    );
+                    capture(&ui, "lyrics-compact-short");
+                    cursor(&ui, 1., true);
+                    let mut settings = app.borrow().settings.clone();
+                    settings.animations = false;
+                    settings.text_scale = 1.4;
+                    apply_settings(&app, settings, false);
+                }
+                4 => {
+                    check(
+                        ui.get_compact_lyric_offset() == 0. && !ui.get_lyrics_motion_enabled(),
+                        "disabled motion elides long compact lyric",
+                    );
+                    capture(&ui, "lyrics-compact-reduced");
+                    ui.set_lyrics_synced(false);
+                    ui.set_lyrics_current("".into());
+                }
+                5 => {
+                    capture(&ui, "lyrics-compact-fallback");
+                    cursor(&ui, 1., false);
+                    transition(&app, IslandState::Idle);
+                }
+                _ => {
+                    check(
+                        !app.borrow().media_clock.running(),
+                        "compact playback clock stops without playback",
+                    );
+                    record("compact lyrics verification complete");
                     let _ = slint::quit_event_loop();
                 }
             }

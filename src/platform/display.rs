@@ -136,7 +136,7 @@ pub(crate) fn canvas_size(dpi_scale: f64, zoom: f64, width: f64, height: f64) ->
 
 pub(crate) fn canvas_extent(value: f64, minimum: f64) -> f64 {
     if value.is_finite() {
-        value.clamp(minimum, 4096.)
+        value.max(minimum)
     } else {
         minimum
     }

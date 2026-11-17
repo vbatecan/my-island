@@ -106,6 +106,16 @@ pub struct Geometry {
     pub radius: f64,
 }
 
+// Existing profiles store the old standard heights. Larger custom sizes
+// continue to specify the full panel height.
+fn reclaim_header(height: f64, standard: f64, removed: f64) -> f64 {
+    if height == standard {
+        height - removed
+    } else {
+        height
+    }
+}
+
 impl IslandState {
     pub const fn is_expanded(self) -> bool {
         matches!(
@@ -196,12 +206,26 @@ impl IslandState {
                 sizes.contracted_width.max(220.),
                 sizes.contracted_height.max(48.),
             ),
-            Self::Media => (sizes.media_width, sizes.media_height),
+            Self::Media => (
+                sizes.media_width,
+                reclaim_header(
+                    sizes.media_height,
+                    SizePreferences::default().media_height,
+                    28.,
+                ),
+            ),
             Self::Plugin => (
                 sizes.expanded_width.max(480.),
                 sizes.expanded_height.max(240.),
             ),
-            _ => (sizes.expanded_width, sizes.expanded_height),
+            _ => (
+                sizes.expanded_width,
+                reclaim_header(
+                    sizes.expanded_height,
+                    SizePreferences::default().expanded_height,
+                    16.,
+                ),
+            ),
         };
         let mut geometry = Geometry {
             width,
@@ -398,7 +422,7 @@ mod tests {
         ] {
             let geometry = IslandState::Media.geometry_for(FormFactor::Notch, 8., 8., available);
             assert!((geometry.width - expected).abs() < 1e-9);
-            assert_eq!(geometry.height, 216.);
+            assert_eq!(geometry.height, 188.);
             assert!(geometry.width + 16. + DISPLAY_MARGIN <= available.min(OVERLAY_WIDTH));
         }
     }

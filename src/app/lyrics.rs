@@ -18,6 +18,27 @@ pub(super) struct Controller {
 
 pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let weak = Rc::downgrade(app);
+    ui.on_compact_lyric_width_changed(move || {
+        let weak = weak.clone();
+        // Slint can report a new measurement while Rust is publishing a line.
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            let Some(app) = weak.upgrade() else { return };
+            {
+                let mut a = app.borrow_mut();
+                if a.state != IslandState::Compact
+                    || a.geometry(a.state).width == a.springs[0].target
+                {
+                    return;
+                }
+                a.retarget_shape();
+                if !a.animations_enabled() {
+                    a.render();
+                }
+            }
+            wake(&app);
+        });
+    });
+    let weak = Rc::downgrade(app);
     ui.on_lyrics_updated(move || {
         if let Some(app) = weak.upgrade() {
             receive(&app);
@@ -52,13 +73,23 @@ fn clear(ui: &IslandWindow, message: &str) {
     ui.set_lyrics_plain("".into());
 }
 
+fn media_visible(a: &App) -> bool {
+    !a.hidden
+        && !a.settings_visible
+        && (a.state == IslandState::Media
+            || matches!(
+                a.presentation.as_ref().map(|p| &p.content),
+                Some(Content::CompactMedia)
+            ))
+}
+
 pub(super) fn sync(app: &Rc<RefCell<App>>, force: bool) {
     let mut a = app.borrow_mut();
     let Some(ui) = a.ui.upgrade() else {
         return;
     };
     ui.set_lyrics_enabled(a.settings.online_lyrics);
-    let visible = a.state == IslandState::Media && !a.hidden && !a.settings_visible;
+    let visible = media_visible(&a);
     let motion_enabled = a.animations_enabled() && visible;
     ui.set_lyrics_motion_enabled(motion_enabled);
     if !motion_enabled {
@@ -74,7 +105,7 @@ pub(super) fn sync(app: &Rc<RefCell<App>>, force: bool) {
         return;
     }
     a.lyrics.released = false;
-    if a.state != IslandState::Media || a.hidden || a.settings_visible {
+    if !visible {
         if a.lyrics.loading {
             a.lyrics.cancel();
             a.lyrics.track = None;
@@ -207,8 +238,7 @@ fn receive(app: &Rc<RefCell<App>>) {
     if event.generation != a.lyrics.generation
         || a.lyrics.track.as_ref() != Some(&event.track)
         || !a.settings.online_lyrics
-        || a.state != IslandState::Media
-        || a.hidden
+        || !media_visible(&a)
     {
         return;
     }
@@ -235,6 +265,8 @@ fn receive(app: &Rc<RefCell<App>>) {
         LyricsStatus::NotFound => clear(&ui, "No matching lyrics on LRCLIB"),
         LyricsStatus::Unavailable(_) => clear(&ui, "Couldn’t reach LRCLIB. Try again."),
     }
+    drop(a);
+    sync_media_clock(app);
 }
 
 pub(super) fn position(a: &App, ui: &IslandWindow) -> f64 {

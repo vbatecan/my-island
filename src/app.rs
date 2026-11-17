@@ -159,6 +159,7 @@ impl App {
             record(&format!("target {state:?}"));
         }
         self.state = state;
+        self.sync_canvas(false);
         if state == IslandState::Idle
             && self.springs[3].position.max(self.springs[4].position) < 0.01
         {
@@ -234,16 +235,47 @@ impl App {
         }
     }
     fn geometry(&self, state: IslandState) -> crate::state::Geometry {
-        state.geometry_for_sizes(
+        let screen = platform::available_width() / self.settings.island_scale;
+        let mut geometry = state.geometry_for_sizes(
             self.settings.form_factor,
             self.settings.notch_corner_radius,
             self.settings.notch_contracted_radius,
-            platform::available_width() / self.settings.island_scale,
+            screen,
             &self.settings.sizes(),
-        )
+        );
+        if state == IslandState::Compact
+            && matches!(
+                self.presentation.as_ref().map(|p| &p.content),
+                Some(Content::CompactMedia)
+            )
+            && let Some(ui) = self.ui.upgrade()
+            && ui.get_lyrics_synced()
+            && !ui.get_lyrics_current().is_empty()
+        {
+            // Match the compact layout's outer margins, artwork and wave slots.
+            let lyric_width = f64::from(ui.get_compact_lyric_width()).ceil() + 112.;
+            let shoulders = if self.settings.form_factor == crate::shape::FormFactor::Notch {
+                16.
+            } else {
+                0.
+            };
+            geometry.width = geometry
+                .width
+                .max(lyric_width)
+                .min((screen - shoulders - 4.).max(1.));
+        }
+        geometry
     }
     fn sync_canvas(&mut self, shrink: bool) -> bool {
-        let requested = self.settings.canvas_size();
+        let mut requested = self.settings.canvas_size();
+        if self.state == IslandState::Compact {
+            let width = self.geometry(self.state).width + 16.;
+            if width > requested.0 {
+                requested.0 = (width * 1.2)
+                    .ceil()
+                    .min(platform::available_width() / self.settings.island_scale);
+            }
+        }
         let next = if shrink {
             requested
         } else {
@@ -270,6 +302,7 @@ impl App {
     /// Retarget only the contour when preferences or display geometry change.
     /// Content and all spring velocities survive the change.
     fn retarget_shape(&mut self) {
+        self.sync_canvas(false);
         let g = self.geometry(self.state);
         self.update_media_layout();
         let target = [
@@ -402,7 +435,24 @@ impl App {
         ui.set_canvas_width(self.canvas_size.0 as f32);
         ui.set_canvas_height(self.canvas_size.1 as f32);
         ui.set_animation_speed(self.settings.animation_speed as f32);
-        let width = self.springs[0].position;
+        let width = if ui.get_compact_media() {
+            let shoulders = if self.settings.form_factor == crate::shape::FormFactor::Notch {
+                16.
+            } else {
+                0.
+            };
+            self.springs[0].position.min(
+                (self
+                    .canvas_size
+                    .0
+                    .min(platform::available_width() / self.settings.island_scale)
+                    - shoulders
+                    - 4.)
+                    .max(1.),
+            )
+        } else {
+            self.springs[0].position
+        };
         let height = self.springs[1].position;
         let radius = self.springs[2].position;
         let form = self.settings.form_factor;
