@@ -51,6 +51,7 @@ pub enum Event {
     BackdropRefresh,
     OpenSettings,
     ClosePanel,
+    OutsidePanelClick,
     HotkeyToggle,
     LauncherToggle,
     EdgeHover(bool),
@@ -393,9 +394,8 @@ pub fn configure_launcher_shortcut(enabled: bool, chord: u32) -> Result<(), Stri
     Ok(())
 }
 
-/// Only an explicit launcher invocation may activate the overlay. Ordinary
-/// island mode always regains WS_EX_NOACTIVATE. Never attach input threads or
-/// synthesize keys to bypass Windows foreground restrictions.
+/// Only an explicit keyboard invocation may activate the overlay. Pointer and
+/// hover interaction keep WS_EX_NOACTIVATE.
 pub fn set_keyboard_mode(active: bool, restore_focus: bool) -> Result<(), String> {
     let (hwnd, previous) = NATIVE.with(|n| {
         let mut n = n.borrow_mut();
@@ -429,7 +429,7 @@ pub fn set_keyboard_mode(active: bool, restore_focus: bool) -> Result<(), String
             if !SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() != hwnd {
                 NATIVE.with(|n| n.borrow_mut().keyboard_mode = false);
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style | WS_EX_NOACTIVATE.0) as isize);
-                return Err("Windows did not grant launcher keyboard focus. Try the launcher shortcut again.".into());
+                return Err("Windows did not grant keyboard focus to Still Island.".into());
             }
             let _ = SetFocus(Some(hwnd));
         } else if restore_focus
@@ -443,7 +443,7 @@ pub fn set_keyboard_mode(active: bool, restore_focus: bool) -> Result<(), String
     refresh_input_hooks()
 }
 
-pub fn launcher_has_foreground() -> bool {
+pub fn overlay_has_foreground() -> bool {
     let hwnd = NATIVE.with(|n| n.borrow().hwnd);
     // SAFETY: read-only query; both handles remain owned by Windows.
     unsafe { !hwnd.is_invalid() && GetForegroundWindow() == hwnd }
@@ -528,7 +528,7 @@ unsafe extern "system" fn mouse_input(code: i32, w: WPARAM, l: LPARAM) -> LRESUL
             let hwnd = NATIVE.with(|n| n.borrow().hwnd);
             let target = WindowFromPoint(point);
             if target != hwnd && GetAncestor(target, GA_ROOT) != hwnd {
-                let _ = PostMessageW(Some(hwnd), CLOSE_PANEL, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(hwnd), CLOSE_PANEL, WPARAM(1), LPARAM(0));
             }
         }
         CallNextHookEx(None, code, w, l)
@@ -1358,7 +1358,11 @@ unsafe extern "system" fn subclass(
                 return LRESULT(0);
             }
             CLOSE_PANEL => {
-                emit(Event::ClosePanel);
+                emit(if wparam.0 == 1 {
+                    Event::OutsidePanelClick
+                } else {
+                    Event::ClosePanel
+                });
                 return LRESULT(0);
             }
             DESKTOP_POLICY => {
@@ -1489,7 +1493,7 @@ fn popup() {
                 (20, "Idle"),
                 (21, "Compact"),
                 (22, "Expanded"),
-                (23, "Volume"),
+                (23, "Control Center"),
                 (24, "Media"),
             ] {
                 let _ = add(demo, id, label, MF_STRING);
@@ -1526,7 +1530,7 @@ fn popup() {
             20 => emit(Event::State(IslandState::Idle)),
             21 => emit(Event::State(IslandState::Compact)),
             22 => emit(Event::State(IslandState::Expanded)),
-            23 => emit(Event::State(IslandState::Volume)),
+            23 => emit(Event::State(IslandState::ControlCenter)),
             24 => emit(Event::State(IslandState::Media)),
             _ => {}
         }

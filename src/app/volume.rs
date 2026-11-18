@@ -5,7 +5,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     {
         let app = app.clone();
         ui.on_open_volume(move || {
-            pages::open(&app, crate::navigation::Page::Volume);
+            pages::open(&app, crate::navigation::Page::ControlCenter);
         });
     }
     {

@@ -1,10 +1,10 @@
 //! Stable page identity, independent of plugin ordering or rendered geometry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
+    ControlCenter,
     Home,
     Media,
     Timer,
-    Volume,
     Plugin { id: String, view: String },
 }
 
@@ -26,7 +26,7 @@ impl Page {
             "downloads" => Self::Home,
             "media" => Self::Media,
             "timer" => Self::Timer,
-            "volume" => Self::Volume,
+            "control-center" | "volume" => Self::ControlCenter,
             _ => {
                 let rest = value.strip_prefix("plugin:")?;
                 let (id, view) = rest.split_once(':')?;
@@ -44,7 +44,7 @@ impl Page {
             Self::Home => "home".into(),
             Self::Media => "media".into(),
             Self::Timer => "timer".into(),
-            Self::Volume => "volume".into(),
+            Self::ControlCenter => "control-center".into(),
             Self::Plugin { id, view } => format!("plugin:{id}:{view}"),
         }
     }
@@ -67,11 +67,12 @@ mod tests {
             "home",
             "media",
             "timer",
-            "volume",
+            "control-center",
             "plugin:org.stillisland.codex-usage:main",
         ] {
             assert_eq!(Page::parse(value).unwrap().encode(), value);
         }
+        assert_eq!(Page::parse("volume"), Some(Page::ControlCenter));
     }
 
     #[test]

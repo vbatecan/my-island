@@ -4,7 +4,7 @@ For Microsoft Store distribution, use `scripts/package.ps1 -Store` and the assig
 
 The portable executable remains usable without installation. Receiving Windows notifications through `UserNotificationListener.NotificationChanged` additionally requires a supported package identity, the declared capability, explicit Windows consent, and the in-app opt-in setting. The portable build reports **UnavailablePortable** and does not attempt a workaround.
 
-`AppxManifest.xml` declares an x64, medium-integrity/full-trust desktop application with `uap3:userNotificationListener`, `rescap:runFullTrust`, and an opt-in desktop StartupTask (`StillIslandStartup`, initially disabled). It does not declare network, service, background-task, or administrator capabilities. The minimum platform is Windows 11 build 22621. The capsule logo assets are original, generated locally by `generate-assets.ps1`; no external asset download is required.
+`AppxManifest.xml` declares an x64, medium-integrity/full-trust desktop application with `uap3:userNotificationListener`, `rescap:runFullTrust`, `radios` for Wi-Fi and Bluetooth switches, `wiFiControl` for Mobile hotspot, and an opt-in desktop StartupTask (`StillIslandStartup`, initially disabled). The minimum platform is Windows 11 build 22621. The capsule logo assets are generated locally by `generate-assets.ps1`.
 
 ## Build an unsigned package
 

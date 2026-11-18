@@ -85,6 +85,14 @@ impl Spring {
     /// Nonpositive and nonfinite deltas are ignored. A large finite delay is
     /// integrated exactly, rather than split into a potentially unbounded loop.
     pub fn advance(&mut self, dt: f64) -> bool {
+        self.advance_with(dt, false)
+    }
+
+    pub fn advance_liquid(&mut self, dt: f64) -> bool {
+        self.advance_with(dt, true)
+    }
+
+    fn advance_with(&mut self, dt: f64, liquid: bool) -> bool {
         if !self.position.is_finite() || !self.velocity.is_finite() {
             self.snap(if self.target.is_finite() {
                 self.target
@@ -110,7 +118,21 @@ impl Spring {
         let v = self.velocity;
         let discriminant = alpha * alpha - omega * omega;
 
-        let (next_y, next_v) = if discriminant.abs() <= omega * omega * 1e-10 {
+        let (next_y, next_v) = if liquid {
+            let ratio = alpha / omega;
+            let bounce = if ratio <= 1. {
+                1. - ratio
+            } else {
+                1. / ratio - 1.
+            };
+            let duration = (std::f64::consts::TAU / omega) as f32;
+            let (dy, dv) = liquid_rust::Spring::new(duration, bounce as f32).solve(
+                y as f32,
+                v as f32,
+                dt.min(60.) as f32,
+            );
+            (f64::from(dy), f64::from(dv))
+        } else if discriminant.abs() <= omega * omega * 1e-10 {
             let decay = (-alpha * dt).exp();
             if decay == 0.0 {
                 (0.0, 0.0)

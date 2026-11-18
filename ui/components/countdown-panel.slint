@@ -1,0 +1,127 @@
+import { TextButton, ProgressTrack } from "controls.slint";
+import { DigitFrame, RollingTime } from "illustrations.slint";
+
+export component CountdownPanel inherits Rectangle {
+    in property <float> ui-scale;
+    in property <float> text-scale;
+    in property <bool> light-material;
+    in property <float> glass-exposure;
+    in property <[DigitFrame]> digits;
+    in property <string> time-label;
+    in property <float> digit-roll;
+    in property <int> draft-minutes;
+    in property <float> progress;
+    in property <bool> running;
+    in property <bool> paused;
+    in property <bool> finished;
+    callback configure(int);
+    callback toggle();
+    callback reset();
+    callback interaction(bool);
+
+    private property <length> unit: 1px * root.ui-scale;
+    private property <length> font-unit: root.unit * root.text-scale;
+    private property <length> heading-height: max(39 * root.unit, 39 * root.font-unit);
+    private property <color> ink: root.light-material ? #202024 : white;
+    private property <color> finished-ink: root.light-material ? #76520e : #f1d795;
+    width: 312 * root.unit;
+    height: root.heading-height + 61 * root.unit;
+
+    Text {
+        visible: root.finished;
+        opacity: 1 - root.digit-roll;
+        x: 0px; y: 0px; width: 236 * root.unit; height: root.heading-height;
+        text: "Time is up";
+        vertical-alignment: center;
+        overflow: elide;
+        color: root.finished-ink;
+        font-size: 26 * root.font-unit;
+        font-weight: 600;
+    }
+    time := RollingTime {
+        visible: !root.finished || root.digit-roll > 0.001;
+        x: root.running || root.finished ? 0px : 39 * root.unit;
+        y: 0px;
+        width: min(194 * root.unit, root.digits.length * self.font-size * 0.62);
+        height: root.heading-height;
+        font-size: (root.finished ? 26 : 31) * root.font-unit;
+        digits: root.digits;
+        roll: root.digit-roll;
+        ink: root.finished ? root.finished-ink : root.ink;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.time-label;
+    }
+    TextButton {
+        visible: !root.running;
+        x: root.finished ? parent.width - 67 * root.unit : 0px;
+        y: (root.heading-height - self.height) / 2;
+        width: 29 * root.unit; height: 27 * root.unit;
+        label: "−"; action-label: "Subtract one minute";
+        enabled: root.draft-minutes > 1;
+        ui-scale: root.ui-scale; text-scale: root.text-scale; light-material: root.light-material;
+        glass-exposure: self.visible ? root.glass-exposure : 0;
+        interaction(down) => { root.interaction(down); }
+        clicked => { root.configure(root.draft-minutes - 1); }
+    }
+    TextButton {
+        visible: !root.running;
+        x: root.finished ? parent.width - self.width : time.x + time.width + 10 * root.unit;
+        y: (root.heading-height - self.height) / 2;
+        width: 29 * root.unit; height: 27 * root.unit;
+        label: "+"; action-label: "Add one minute";
+        enabled: root.draft-minutes < 1440;
+        ui-scale: root.ui-scale; text-scale: root.text-scale; light-material: root.light-material;
+        glass-exposure: self.visible ? root.glass-exposure : 0;
+        interaction(down) => { root.interaction(down); }
+        clicked => { root.configure(root.draft-minutes + 1); }
+    }
+    Text {
+        visible: root.paused;
+        x: parent.width - self.width; y: 0px;
+        width: 47 * root.unit; height: root.heading-height;
+        text: "Paused";
+        font-size: 10 * root.font-unit;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        color: root.light-material ? #4b4b54 : #b3b3bf;
+    }
+    ProgressTrack {
+        visible: root.running || root.paused || root.finished;
+        x: 0px; y: root.heading-height + 2 * root.unit;
+        width: parent.width; height: 2 * root.unit;
+        ui-scale: root.ui-scale; light-material: root.light-material;
+        glass-exposure: self.visible ? root.glass-exposure : 0;
+        value: root.progress;
+        fill-color: root.finished ? root.finished-ink : root.ink;
+    }
+    for minutes[index] in [1, 5, 15] : TextButton {
+        x: index * 62 * root.unit;
+        y: root.heading-height + 9 * root.unit;
+        width: 56 * root.unit; height: 21 * root.unit;
+        label: minutes + " min";
+        enabled: !root.running;
+        ui-scale: root.ui-scale; text-scale: root.text-scale; light-material: root.light-material;
+        glass-exposure: root.glass-exposure;
+        interaction(down) => { root.interaction(down); }
+        clicked => { root.configure(minutes); }
+    }
+    TextButton {
+        x: 0px; y: root.heading-height + 35 * root.unit;
+        width: 200 * root.unit; height: 26 * root.unit;
+        label: root.running ? "Pause" : root.finished ? "Restart" : root.paused ? "Resume" : "Start";
+        primary: true;
+        ui-scale: root.ui-scale; text-scale: root.text-scale; light-material: root.light-material;
+        interaction(down) => { root.interaction(down); }
+        clicked => { root.toggle(); }
+    }
+    TextButton {
+        x: 208 * root.unit; y: root.heading-height + 35 * root.unit;
+        width: 104 * root.unit; height: 26 * root.unit;
+        label: "Reset";
+        enabled: root.running || root.paused || root.finished;
+        ui-scale: root.ui-scale; text-scale: root.text-scale; light-material: root.light-material;
+        glass-exposure: root.glass-exposure;
+        interaction(down) => { root.interaction(down); }
+        clicked => { root.reset(); }
+    }
+}

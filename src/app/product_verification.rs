@@ -19,6 +19,15 @@ fn capture(ui: &IslandWindow, name: &str) {
     }
 }
 
+fn compact_launcher(ui: &IslandWindow, max_height: f32, label: &str) {
+    check(
+        ui.get_reveal() > 0.99
+            && ui.get_shape_height() <= max_height
+            && (ui.get_shape_height() - ui.get_launcher_height()).abs() < 1.,
+        label,
+    );
+}
+
 fn key(ui: &IslandWindow, text: impl Into<slint::SharedString>) {
     use slint::platform::WindowEvent;
 
@@ -62,7 +71,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
         return;
     }
 
-    for step in 0..17 {
+    for step in 0..22 {
         let weak = Rc::downgrade(app);
         slint::Timer::single_shot(Duration::from_millis(600 + step * 1100), move || {
             let Some(app) = weak.upgrade() else {
@@ -122,7 +131,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     for page in [
                         crate::navigation::Page::Media,
                         crate::navigation::Page::Timer,
-                        crate::navigation::Page::Volume,
+                        crate::navigation::Page::ControlCenter,
                     ] {
                         app.borrow_mut().page_wheel.reset();
                         let result = page_verification::send_wheel(
@@ -228,6 +237,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     );
                 }
                 11 => {
+                    compact_launcher(&ui, 140., "one launcher action fits a compact shell");
                     capture(&ui, "product-launcher-empty-actions");
                     key(&ui, Key::Return);
                     check(
@@ -322,6 +332,45 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     check(!app.borrow().launcher.open, "Escape dismisses the launcher");
                 }
                 16 => {
+                    if verification_isolated_material() {
+                        launcher::toggle_for_local_verification(&app);
+                    } else {
+                        launcher::toggle(&app);
+                    }
+                    query(&ui, "3+");
+                }
+                17 => {
+                    check(
+                        !ui.get_answer_visible() && !ui.get_answer_slow() && !ui.get_answer_error(),
+                        "partial expression stays quiet",
+                    );
+                    compact_launcher(&ui, 100., "partial expression keeps only the search field");
+                    capture(&ui, "product-launcher-partial");
+                    query(&ui, "18*4");
+                }
+                18 => {
+                    check(
+                        ui.get_answer_visible() && ui.get_answer_value() == "72",
+                        "arithmetic still produces the primary answer",
+                    );
+                    compact_launcher(&ui, 165., "single arithmetic answer fits a compact shell");
+                    capture(&ui, "product-launcher-calculation");
+                    query(&ui, "1 + * 2");
+                }
+                19 => {
+                    check(
+                        ui.get_answer_visible() && ui.get_answer_error(),
+                        "invalid expression has an actionable error",
+                    );
+                    compact_launcher(&ui, 205., "calculation error fits its message");
+                    capture(&ui, "product-launcher-calculation-error");
+                    query(&ui, "zz-still-island-empty-fixture");
+                }
+                20 => {
+                    compact_launcher(&ui, 145., "empty result fits its message");
+                    capture(&ui, "product-launcher-no-results");
+                }
+                21 => {
                     record("product verification complete");
                     let _ = slint::quit_event_loop();
                 }

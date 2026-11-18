@@ -348,7 +348,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     );
                     capture(&ui, "lyrics-narrow-overshoot");
                     app.borrow_mut().springs[0].snap(width);
-                    app.borrow().update_media_layout();
+                    app.borrow().update_panel_layouts();
                     app.borrow().render();
                 }
                 10 => {

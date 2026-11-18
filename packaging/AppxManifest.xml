@@ -33,5 +33,8 @@
   <Capabilities>
     <uap3:Capability Name="userNotificationListener" />
     <rescap:Capability Name="runFullTrust" />
+    <DeviceCapability Name="radios" />
+    <DeviceCapability Name="bluetooth" />
+    <DeviceCapability Name="wiFiControl" />
   </Capabilities>
 </Package>

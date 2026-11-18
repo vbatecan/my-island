@@ -85,7 +85,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     );
                 }
                 10 => {
-                    transition(&app, IslandState::Volume);
+                    transition(&app, IslandState::ControlCenter);
                     ui.set_volume_available(true);
                     ui.set_volume(20);
                 }

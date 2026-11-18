@@ -178,6 +178,29 @@ pub(super) fn wire_preferences(app: &Rc<RefCell<App>>, prefs: &SettingsWindow) {
 
 pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let weak = Rc::downgrade(app);
+    ui.on_launcher_height_changed(move || {
+        let weak = weak.clone();
+        // Model updates can change the measurement while the host is borrowed.
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            let Some(app) = weak.upgrade() else { return };
+            {
+                let mut a = app.borrow_mut();
+                if a.state != IslandState::AppLauncher || a.visibility.hiding || a.hidden {
+                    return;
+                }
+                let target = a.pending_geometry.map_or(a.springs[1].target, |g| g[1]);
+                if a.target_geometry(a.state).height == target {
+                    return;
+                }
+                a.retarget_shape();
+                if !a.animations_enabled() {
+                    a.render();
+                }
+            }
+            wake(&app);
+        });
+    });
+    let weak = Rc::downgrade(app);
     ui.on_launcher_updated(move || {
         if let Some(app) = weak.upgrade() {
             receive(&app);
@@ -510,11 +533,11 @@ fn toggle_with_focus(app: &Rc<RefCell<App>>, acquire_foreground: bool) {
     if app.borrow().visibility.locked || app.borrow().settings_visible {
         return;
     }
+    pages::cancel(app);
     {
         let mut a = app.borrow_mut();
         a.hover_timer.stop();
         a.collapse_timer.stop();
-        a.page_switch_timer.stop();
         a.launcher.open = true;
         a.launcher.focus_epoch = a.launcher.focus_epoch.wrapping_add(1);
         a.launcher.ensure_loaded();

@@ -57,6 +57,13 @@ pub const ENTRIES: &[Entry] = &[
         keywords: "wireless|internet",
     },
     Entry {
+        id: "mobile-hotspot",
+        label: "Mobile hotspot",
+        executable: "",
+        argument: "ms-settings:network-mobilehotspot",
+        keywords: "tethering|share internet",
+    },
+    Entry {
         id: "ethernet",
         label: "Ethernet",
         executable: "",
@@ -239,7 +246,7 @@ mod tests {
     #[test]
     fn windows_commands_are_unique_and_fixed() {
         let mut ids = std::collections::HashSet::new();
-        assert_eq!(ENTRIES.len(), 31);
+        assert_eq!(ENTRIES.len(), 32);
         for entry in ENTRIES {
             assert!(ids.insert(entry.id));
             assert!(!entry.label.is_empty());

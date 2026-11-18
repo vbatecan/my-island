@@ -133,6 +133,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>, ui: &IslandWindow, window: &PluginMa
                     settings.hover_expand = true;
                     settings.hover_delay = 150;
                     settings.collapse_delay = 200;
+                    settings.collapse_on_leave = true;
                     settings.selected_page = None;
                     apply_settings(&app, settings, false);
                     let Some(host) = app.borrow().plugin_host.clone() else {
@@ -174,16 +175,33 @@ pub(super) fn setup(app: &Rc<RefCell<App>>, ui: &IslandWindow, window: &PluginMa
                     ui.set_volume_available(true);
                     ui.set_volume(46);
                     ui.invoke_hover(true);
-                    pages::open(&app, Page::Home);
+                    pages::open(&app, Page::ControlCenter);
                 }
                 1 => {
                     check(
-                        selected(&app, &Page::Home) && ui.get_page_count() == 5,
-                        "Home plus four named destinations in deterministic page list",
+                        selected(&app, &Page::ControlCenter)
+                            && ui.get_control_center_mode()
+                            && ui.get_page_count() == 5
+                            && ui.get_page_index() == 0,
+                        "Control Center is the first page and the expanded volume destination",
+                    );
+                    protected_wheel(
+                        &app,
+                        &ui,
+                        |ui, x, y| ui.invoke_volume_scroll_hit(x, y),
+                        "wheel over volume fader retains Control Center",
+                    );
+                    check(
+                        ui.get_volume() == 46 && app.borrow().volume.is_none(),
+                        "volume gesture fixture cannot mutate real system volume",
                     );
                     next_page(&app, &ui);
                 }
                 2 => {
+                    check(selected(&app, &Page::Home), "wheel Control Center to Home");
+                    next_page(&app, &ui);
+                }
+                3 => {
                     check(
                         selected(&app, &Page::Media) && ui.get_media_mode(),
                         "wheel Home to Media",
@@ -206,34 +224,17 @@ pub(super) fn setup(app: &Rc<RefCell<App>>, ui: &IslandWindow, window: &PluginMa
                     ui.set_player_picker_open(false);
                     next_page(&app, &ui);
                 }
-                3 => {
+                4 => {
                     check(
                         selected(&app, &Page::Timer) && ui.get_timer_mode(),
                         "wheel Media to Timer",
                     );
                     next_page(&app, &ui);
                 }
-                4 => {
-                    check(
-                        selected(&app, &Page::Volume) && ui.get_volume_mode(),
-                        "wheel Timer to Volume",
-                    );
-                    protected_wheel(
-                        &app,
-                        &ui,
-                        |ui, x, y| ui.invoke_volume_scroll_hit(x, y),
-                        "wheel over volume slider retains Volume",
-                    );
-                    check(
-                        ui.get_volume() == 46 && app.borrow().volume.is_none(),
-                        "volume gesture fixture cannot mutate real system volume",
-                    );
-                    next_page(&app, &ui);
-                }
                 5 => {
                     check(
                         selected(&app, &codex()) && ui.get_plugin_mode(),
-                        "wheel Volume to Codex",
+                        "wheel Timer to Codex",
                     );
                     let nodes = (0..ui.get_plugin_nodes().row_count())
                         .filter_map(|index| ui.get_plugin_nodes().row_data(index))
@@ -328,9 +329,11 @@ pub(super) fn setup(app: &Rc<RefCell<App>>, ui: &IslandWindow, window: &PluginMa
                     check(
                         selected(&app, &codex())
                             && app.borrow().coordinator.panel_open()
-                            && ui.get_plugin_mode(),
-                        "hover reentry reopens remembered Codex page",
+                            && ui.get_control_center_mode()
+                            && ui.get_page_index() == 0,
+                        "hover reentry starts at Control Center and retains compact Codex selection",
                     );
+                    pages::open(&app, codex());
                     ui.invoke_toggle_pin();
                     ui.invoke_hover(false);
                     let mut settings = app.borrow().settings.clone();
@@ -367,7 +370,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>, ui: &IslandWindow, window: &PluginMa
                 12 => {
                     check(
                         !app.borrow().coordinator.panel_open()
-                            && selected(&app, &Page::Timer)
+                            && selected(&app, &codex())
                             && !app.borrow().page_switch_timer.running(),
                         "rapid interrupted page switches cannot reopen after hover leave",
                     );

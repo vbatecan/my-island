@@ -89,6 +89,13 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                         "smallest two-column media width remains independent of text size",
                     );
                     check(!ui.get_can_seek(), "unsupported seeking remains disabled");
+                    if ui.get_appearance() == Appearance::LiquidGlass as i32 {
+                        check(
+                            ui.get_surface_glass_visible()
+                                && ui.global::<crate::LiquidSurfaces>().get_rendered_count() >= 5,
+                            "media buttons and seek track use Liquid Rust",
+                        );
+                    }
                     capture(&ui, "media-polish-large-text-narrow");
                     ui.invoke_media_change();
                 }
@@ -141,7 +148,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     );
                 }
                 7 => {
-                    transition(&app, IslandState::Volume);
+                    transition(&app, IslandState::ControlCenter);
                     ui.set_volume_available(true);
                     ui.set_volume(72);
                 }
@@ -171,6 +178,10 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) {
                     // select this fixture after it has finished mounting.
                     ui.set_compact_media(true);
                     capture(&ui, "media-polish-compact-large-text");
+                    // Freeze desktop pixels before measuring idle UI redraws.
+                    // Live capture can render a changed desktop while media is paused.
+                    let capture = app.borrow_mut().capture.take();
+                    drop(capture);
                 }
                 12 => *settled.borrow_mut() = app.borrow().metrics.summary(),
                 _ => {

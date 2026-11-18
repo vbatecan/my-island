@@ -4184,6 +4184,7 @@ name = "still-island"
 version = "0.3.1"
 dependencies = [
  "fend-core",
+ "futures-channel",
  "glow 0.16.0",
  "liquid-rust",
  "notify",
@@ -4197,6 +4198,7 @@ dependencies = [
  "url",
  "wgpu",
  "windows",
+ "windows-collections",
  "windows-core",
  "zip",
 ]

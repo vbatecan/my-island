@@ -57,7 +57,7 @@ fn apply_summary(
             .iter()
             .find(|p| p.manifest.id == id)
             .map(|p| p.manifest.name.clone())
-            .unwrap_or_else(|| "Integration unavailable".into()),
+            .unwrap_or_else(|| "Add-on unavailable".into()),
         body: "Hover to open · no reported summary yet".into(),
         progress: None,
         accent: Accent::Neutral,
@@ -324,7 +324,7 @@ fn refresh(
         window.set_fields(model(vec![]));
         window.set_actions(model(vec![]));
         window.set_nodes(model(vec![]));
-        ui.set_plugin_title("Integrations".into());
+        ui.set_plugin_title("Add-ons".into());
     }
 }
 fn select(
@@ -555,7 +555,7 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
             }
         });
         let Some(owner) = owner else {
-            window.set_status("The integration window is not ready. Try Browse again.".into());
+            window.set_status("The add-ons window is not ready. Try Browse again.".into());
             return;
         };
         window.set_busy(true);
@@ -797,7 +797,7 @@ fn open_uri_action(uri: &str) -> Result<(), String> {
         )
     };
     if result.0 as isize <= 32 {
-        Err("Windows could not open the integration link".into())
+        Err("Windows could not open the add-on link".into())
     } else {
         Ok(())
     }

@@ -52,10 +52,17 @@ const CONTEXT: GUID = GUID::from_u128(0x53dcfc9c_01de_4b57_aeae_331dc2bff308);
 
 type Reply<T> = SyncSender<Result<T, String>>;
 type ChangeHandler = Arc<dyn Fn(VolumeEvent) + Send + Sync>;
+type WriteReply = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+#[derive(Clone, Copy)]
+pub enum VolumeAction {
+    Set(i32),
+    ToggleMute,
+}
+
 enum Command {
     Snapshot(Reply<VolumeSnapshot>),
-    Set(i32, Reply<()>),
-    ToggleMute(Reply<()>),
+    Apply(VolumeAction, WriteReply),
     Refresh(VolumeOrigin),
     Rebind,
     Shutdown,
@@ -124,10 +131,32 @@ impl VolumeService {
         self.request(Command::Snapshot)
     }
     pub fn set_volume(&self, percent: i32) -> Result<(), String> {
-        self.request(|reply| Command::Set(percent.clamp(0, 100), reply))
+        self.apply(VolumeAction::Set(percent))
     }
     pub fn toggle_mute(&self) -> Result<(), String> {
-        self.request(Command::ToggleMute)
+        self.apply(VolumeAction::ToggleMute)
+    }
+    fn apply(&self, action: VolumeAction) -> Result<(), String> {
+        self.request(|reply| {
+            Command::Apply(
+                action,
+                Box::new(move |result| {
+                    let _ = reply.send(result);
+                }),
+            )
+        })
+    }
+    pub async fn apply_async(&self, action: VolumeAction) -> Result<(), String> {
+        let (reply, receive) = futures_channel::oneshot::channel();
+        self.commands
+            .send(Command::Apply(
+                action,
+                Box::new(move |result| {
+                    let _ = reply.send(result);
+                }),
+            ))
+            .map_err(|_| "Core Audio service stopped".to_owned())?;
+        receive.await.map_err(|error| error.to_string())?
     }
     fn request<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
@@ -328,45 +357,33 @@ impl Worker {
                 Command::Snapshot(reply) => {
                     let _ = reply.send(self.read());
                 }
-                Command::Set(percent, reply) => {
-                    // SAFETY: endpoint is live on this MTA; scalar is clamped.
-                    let result = if let Some(endpoint) = &self.endpoint {
-                        unsafe {
-                            endpoint
-                                .volume
-                                .SetMasterVolumeLevelScalar(percent as f32 / 100.0, &CONTEXT)
-                        }
-                        .map_err(|e| format!("Cannot change output volume: {e}"))
-                    } else {
-                        Err(self.endpoint_error.clone())
-                    };
+                Command::Apply(action, reply) => {
+                    let result = self.apply(action);
                     self.publish(VolumeOrigin::Local);
-                    let _ = reply.send(result);
-                }
-                Command::ToggleMute(reply) => {
-                    let result = (|| {
-                        let Some(endpoint) = &self.endpoint else {
-                            return Err(self.endpoint_error.clone());
-                        };
-                        // SAFETY: both operations use this thread's live endpoint;
-                        // null context is allowed by Core Audio.
-                        unsafe {
-                            let muted = endpoint
-                                .volume
-                                .GetMute()
-                                .map_err(|e| e.to_string())?
-                                .as_bool();
-                            endpoint
-                                .volume
-                                .SetMute(!muted, &CONTEXT)
-                                .map_err(|e| format!("Cannot mute output: {e}"))
-                        }
-                    })();
-                    self.publish(VolumeOrigin::Local);
-                    let _ = reply.send(result);
+                    reply(result);
                 }
             }
         }
+    }
+
+    fn apply(&self, action: VolumeAction) -> Result<(), String> {
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .ok_or_else(|| self.endpoint_error.clone())?;
+        // SAFETY: the endpoint is live on this MTA and the scalar is clamped.
+        unsafe {
+            match action {
+                VolumeAction::Set(percent) => endpoint
+                    .volume
+                    .SetMasterVolumeLevelScalar(percent.clamp(0, 100) as f32 / 100.0, &CONTEXT),
+                VolumeAction::ToggleMute => endpoint
+                    .volume
+                    .GetMute()
+                    .and_then(|muted| endpoint.volume.SetMute(!muted.as_bool(), &CONTEXT)),
+            }
+        }
+        .map_err(|error| format!("Cannot change output audio: {error}"))
     }
 }
 impl Drop for Worker {

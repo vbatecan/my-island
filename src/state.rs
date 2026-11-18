@@ -7,6 +7,10 @@ pub const OVERLAY_WIDTH: f64 = 800.0;
 pub const OVERLAY_HEIGHT: f64 = 300.0;
 pub const EXPANDED_RADIUS: f64 = 12.0;
 pub const NOTCH_EXPANDED_RADIUS: f64 = 8.0;
+pub const CONTROL_CENTER_WIDE: f64 = 540.0;
+pub const CONTROL_CENTER_DEVICE_HEIGHT: f64 = 404.0;
+const CONTROL_CENTER_STACK_HEIGHT: f64 = 370.0;
+const CONTROL_CENTER_RADIUS: f64 = 24.0;
 const DISPLAY_MARGIN: f64 = 24.0;
 const OVERSHOOT_ALLOWANCE: f64 = 0.2;
 /// Base layout dimensions, independent of user zoom and Windows DPI.
@@ -73,6 +77,7 @@ impl SizePreferences {
             .max(s.expanded_height)
             .max(240.)
             .max(400.)
+            .max(CONTROL_CENTER_DEVICE_HEIGHT)
             .max(s.media_height);
         (
             (width + (width - s.contracted_width).max(0.) * OVERSHOOT_ALLOWANCE + 40.)
@@ -90,7 +95,7 @@ pub enum IslandState {
     Idle,
     Compact,
     Expanded,
-    Volume,
+    ControlCenter,
     Media,
     Notification,
     Timer,
@@ -122,7 +127,7 @@ impl IslandState {
             self,
             Self::Expanded
                 | Self::Media
-                | Self::Volume
+                | Self::ControlCenter
                 | Self::Notification
                 | Self::Timer
                 | Self::Battery
@@ -158,13 +163,16 @@ impl IslandState {
                 height: 240.0,
                 radius: EXPANDED_RADIUS,
             },
-            Self::Expanded | Self::Volume | Self::Notification | Self::Timer | Self::Battery => {
-                Geometry {
-                    width: 360.0,
-                    height: 160.0,
-                    radius: EXPANDED_RADIUS,
-                }
-            }
+            Self::ControlCenter => Geometry {
+                width: 620.,
+                height: 264.,
+                radius: CONTROL_CENTER_RADIUS,
+            },
+            Self::Expanded | Self::Notification | Self::Timer | Self::Battery => Geometry {
+                width: 360.0,
+                height: 160.0,
+                radius: EXPANDED_RADIUS,
+            },
         }
     }
 
@@ -218,6 +226,10 @@ impl IslandState {
                 sizes.expanded_width.max(480.),
                 sizes.expanded_height.max(240.),
             ),
+            Self::ControlCenter => (
+                sizes.expanded_width.max(self.geometry().width),
+                sizes.expanded_height.max(self.geometry().height),
+            ),
             _ => (
                 sizes.expanded_width,
                 reclaim_header(
@@ -230,7 +242,9 @@ impl IslandState {
         let mut geometry = Geometry {
             width,
             height,
-            radius: if self.is_expanded() {
+            radius: if self == Self::ControlCenter {
+                CONTROL_CENTER_RADIUS
+            } else if self.is_expanded() {
                 EXPANDED_RADIUS
             } else {
                 height / 2.
@@ -268,6 +282,9 @@ impl IslandState {
         let spring_safe =
             (budget + sizes.contracted_width * OVERSHOOT_ALLOWANCE) / (1. + OVERSHOOT_ALLOWANCE);
         geometry.width = geometry.width.min(spring_safe.max(minimum)).min(budget);
+        if self == Self::ControlCenter && geometry.width < CONTROL_CENTER_WIDE {
+            geometry.height = geometry.height.max(CONTROL_CENTER_STACK_HEIGHT);
+        }
         geometry
     }
 }
@@ -312,7 +329,7 @@ mod tests {
         let canvas = sizes.canvas_size();
         assert!(canvas.0 >= 1000. + (1000. - 260.) * 0.2 + 40.);
         assert!(canvas.1 >= 400. + (400. - 60.) * 0.2 + 24.);
-        assert_eq!(SizePreferences::default().canvas_size(), (800., 498.));
+        assert_eq!(SizePreferences::default().canvas_size(), (800., 503.));
         let launcher = IslandState::AppLauncher.geometry_for_sizes(
             FormFactor::Notch,
             8.,
@@ -327,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_is_capsule_and_island_panels_keep_twelve_pixel_corners() {
+    fn compact_is_capsule_and_island_panels_have_their_own_corner_radius() {
         for state in [IslandState::Idle, IslandState::Compact] {
             let geometry = state.geometry();
             assert_eq!(geometry.radius, geometry.height / 2.);
@@ -336,22 +353,38 @@ mod tests {
         for state in [
             IslandState::Expanded,
             IslandState::Media,
-            IslandState::Volume,
+            IslandState::ControlCenter,
             IslandState::Notification,
             IslandState::Timer,
             IslandState::Battery,
             IslandState::Plugin,
         ] {
             let geometry = state.geometry();
-            assert_eq!(geometry.radius, 12.);
+            assert_eq!(
+                geometry.radius,
+                if state == IslandState::ControlCenter {
+                    CONTROL_CENTER_RADIUS
+                } else {
+                    EXPANDED_RADIUS
+                }
+            );
             assert!(state.is_expanded());
             let dimensions = match state {
                 IslandState::Media => (640., 216.),
+                IslandState::ControlCenter => (620., 264.),
                 IslandState::Plugin => (480., 240.),
                 _ => (360., 160.),
             };
             assert_eq!((geometry.width, geometry.height), dimensions);
         }
+        let narrow = IslandState::ControlCenter.geometry_for(FormFactor::Notch, 8., 8., 384.);
+        assert!(narrow.width < CONTROL_CENTER_WIDE);
+        assert_eq!(narrow.height, CONTROL_CENTER_STACK_HEIGHT);
+        assert_eq!(narrow.radius, 8.);
+        let floating = IslandState::ControlCenter.geometry_for(FormFactor::Island, 8., 8., 384.);
+        assert_eq!(floating.radius, CONTROL_CENTER_RADIUS);
+        let peak = narrow.height + (narrow.height - 32.) * OVERSHOOT_ALLOWANCE;
+        assert!(peak + 24. <= SizePreferences::default().canvas_size().1);
     }
 
     #[test]
@@ -376,7 +409,7 @@ mod tests {
         for state in [
             IslandState::Expanded,
             IslandState::Media,
-            IslandState::Volume,
+            IslandState::ControlCenter,
             IslandState::Notification,
             IslandState::Timer,
             IslandState::Battery,
@@ -398,7 +431,11 @@ mod tests {
             );
             assert_eq!(
                 state.geometry_for(FormFactor::Island, 8., 8., 1920.).radius,
-                12.
+                if state == IslandState::ControlCenter {
+                    CONTROL_CENTER_RADIUS
+                } else {
+                    EXPANDED_RADIUS
+                }
             );
         }
         for state in [IslandState::Idle, IslandState::Compact] {

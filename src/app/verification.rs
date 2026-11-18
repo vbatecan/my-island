@@ -1,7 +1,7 @@
 //! Opt-in regression orchestration kept outside the production UI lifecycle.
 use super::*;
 
-const VERIFICATION_FLAGS: [&str; 18] = [
+const VERIFICATION_FLAGS: [&str; 19] = [
     "--verify-surface",
     "--verify-product",
     "--verify-hover-morph",
@@ -19,6 +19,7 @@ const VERIFICATION_FLAGS: [&str; 18] = [
     "--verify-contracted-corners",
     "--verify-size",
     "--verify-layout",
+    "--verify-control-center",
     "--verify-media-polish",
 ];
 pub(super) fn has_arg(flag: &str) -> bool {
@@ -36,6 +37,10 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) -> slint::Timer {
     }
     if has_arg("--verify-product") {
         product_verification::setup(app);
+        return slint::Timer::default();
+    }
+    if has_arg("--verify-control-center") {
+        control_center_verification::setup(app);
         return slint::Timer::default();
     }
     if has_arg("--verify-hover-morph") {
@@ -171,7 +176,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) -> slint::Timer {
                                 1 | 25 => IslandState::Idle,
                                 2 => IslandState::Expanded,
                                 3 => IslandState::Media,
-                                _ => IslandState::Volume,
+                                _ => IslandState::ControlCenter,
                             };
                             if app.borrow().state != expected {
                                 record(&format!(
@@ -209,7 +214,7 @@ pub(super) fn setup(app: &Rc<RefCell<App>>) -> slint::Timer {
                     match stage {
                         1 => transition(&app, IslandState::Expanded),
                         2 => transition(&app, IslandState::Media),
-                        3 => transition(&app, IslandState::Volume),
+                        3 => transition(&app, IslandState::ControlCenter),
                         4..=23 => transition(
                             &app,
                             if stage.is_multiple_of(2) {
@@ -380,8 +385,10 @@ fn verify_interactions(app: &Rc<RefCell<App>>) {
                 }
                 16 => {
                     check(
-                        ui.get_timer_finished() && app.borrow().state == IslandState::Timer,
-                        "completion morph",
+                        ui.get_timer_finished()
+                            && ui.get_compact_timer()
+                            && app.borrow().state == IslandState::Compact,
+                        "completion appears in the compact timer",
                     );
                     capture("timer-finished");
                 }
@@ -394,8 +401,8 @@ fn verify_interactions(app: &Rc<RefCell<App>>) {
                 }
                 18 => {
                     check(
-                        app.borrow().coordinator.panel_open(),
-                        "new hover visit opens after countdown",
+                        app.borrow().state == IslandState::ControlCenter,
+                        "new hover visit opens Control Center after countdown",
                     );
                     ui.invoke_pointer_interaction(true);
                     ui.invoke_hover(false);

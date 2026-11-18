@@ -1,10 +1,99 @@
 //! Live desktop capture and on-demand backdrop fallback.
 use super::*;
+use crate::{GlassBounds, LiquidSurfaces, liquid_rust_renderer::Lens};
+use std::collections::BTreeMap;
+
+#[derive(Default)]
+struct Surfaces {
+    bounds: BTreeMap<i32, GlassBounds>,
+    next_id: i32,
+    resetting: bool,
+}
+
+impl Surfaces {
+    fn collect(&self, ui: &IslandWindow, canvas: [f32; 2]) -> Arc<[Lens]> {
+        let unit = ui.get_ui_scale();
+        let [left, top] = [ui.get_glass_origin_x(), ui.get_glass_origin_y()];
+        let align = |value: f32| (4. * value / unit).round() / 4.;
+        self.bounds
+            .iter()
+            .filter_map(|(&id, bounds)| {
+                let x = align(bounds.x - left);
+                let y = align(bounds.y - top);
+                let w = align(bounds.width);
+                let h = align(bounds.height);
+                (w > 0. && h > 0. && x + w > 0. && y + h > 0. && x < canvas[0] && y < canvas[1])
+                    .then(|| Lens {
+                        id,
+                        rect: [x, y, w, h],
+                        radius: align(bounds.radius),
+                        exposure: (100. * bounds.exposure).round() / 100.,
+                        layer: bounds.layer,
+                        pressed: bounds.pressed,
+                        material: bounds.material,
+                    })
+            })
+            .collect()
+    }
+}
+
+fn wire_surfaces(ui: &IslandWindow) -> Rc<RefCell<Surfaces>> {
+    let surfaces = Rc::new(RefCell::new(Surfaces::default()));
+    let global = ui.global::<LiquidSurfaces>();
+    let ids = surfaces.clone();
+    global.on_allocate(move || {
+        let mut state = ids.borrow_mut();
+        state.next_id += 1;
+        state.next_id
+    });
+    let pending = surfaces.clone();
+    let window = ui.as_weak();
+    global.on_publish(move |id, bounds| {
+        let mut state = pending.borrow_mut();
+        let changed = if bounds.width <= 0. || bounds.height <= 0. {
+            state.bounds.remove(&id).is_some()
+        } else if state.bounds.get(&id) == Some(&bounds) {
+            false
+        } else {
+            state.bounds.insert(id, bounds);
+            true
+        };
+        drop(state);
+        if changed && let Some(ui) = window.upgrade() {
+            ui.window().request_redraw();
+        }
+    });
+    let pending = surfaces.clone();
+    let window = ui.as_weak();
+    global.on_invalidate(move || {
+        let Some(ui) = window.upgrade() else { return };
+        if !ui.global::<LiquidSurfaces>().get_enabled() || pending.borrow().resetting {
+            return;
+        }
+        pending.borrow_mut().resetting = true;
+        let pending = pending.clone();
+        let window = window.clone();
+        // Let Slint finish removing and creating repeater children first.
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            let mut state = pending.borrow_mut();
+            state.resetting = false;
+            state.bounds.clear();
+            drop(state);
+            if let Some(ui) = window.upgrade() {
+                let global = ui.global::<LiquidSurfaces>();
+                global.set_generation(global.get_generation().wrapping_add(1));
+                ui.window().request_redraw();
+            }
+        });
+    });
+    surfaces
+}
 
 /// The sole main-window rendering notifier owns both optics and instrumentation.
 pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let weak = Rc::downgrade(app);
     let ui_weak = ui.as_weak();
+    let surfaces = wire_surfaces(ui);
     let mut renderer: Option<crate::liquid::Renderer> = None;
     let mut liquid = None;
     let mut liquid_failed = false;
@@ -13,9 +102,7 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     let result = ui.window().set_rendering_notifier(move |state, api| {
         if matches!(state, slint::RenderingState::RenderingTeardown) {
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_gpu_material(false);
-                ui.set_glass_texture(slint::Image::default());
-                ui.set_has_glass_texture(false);
+                clear_image(&ui);
             }
             // SAFETY: the image is cleared and teardown owns the current context.
             unsafe { release_renderer(&mut renderer); }
@@ -36,6 +123,11 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
 
                 let a = app.borrow();
                 let appearance = a.settings.appearance;
+                let global = ui.global::<LiquidSurfaces>();
+                let enabled = appearance == Appearance::LiquidGlass && !liquid_failed;
+                if global.get_enabled() != enabled {
+                    global.set_enabled(enabled);
+                }
                 if appearance == Appearance::LiquidGlass {
                     failed = false;
                     if renderer.is_some() {
@@ -44,11 +136,12 @@ pub(super) fn install_renderer(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
                         unsafe { release_renderer(&mut renderer); }
                     }
                     if !a.hidden && !liquid_failed {
-                        let result = render_liquid(&a, &ui, &mut liquid, &mut liquid_sampled);
+                        let result = render_liquid(&a, &ui, &mut liquid, &mut liquid_sampled, &surfaces);
                         drop(a);
                         if let Err(error) = result {
                             liquid = None;
                             liquid_failed = true;
+                            global.set_enabled(false);
                             clear_image(&ui);
                             record(&format!("Liquid Rust rendering failed: {error}"));
                             status(&app, "Liquid Glass graphics unavailable. Update the graphics driver and try again.");
@@ -149,6 +242,10 @@ fn clear_image(ui: &IslandWindow) {
     ui.set_gpu_material(false);
     ui.set_glass_texture(slint::Image::default());
     ui.set_has_glass_texture(false);
+    ui.set_surface_glass_texture(slint::Image::default());
+    let global = ui.global::<LiquidSurfaces>();
+    global.set_ready(false);
+    global.set_rendered_count(0);
 }
 
 fn render_liquid(
@@ -156,6 +253,7 @@ fn render_liquid(
     ui: &IslandWindow,
     worker: &mut Option<crate::liquid_rust_renderer::Worker>,
     sampled: &mut Option<(u64, u32)>,
+    surfaces: &RefCell<Surfaces>,
 ) -> Result<(), String> {
     use crate::liquid_rust_renderer::{Layout, Worker};
     let mut glass = app.glass.borrow_mut();
@@ -166,9 +264,9 @@ fn render_liquid(
     let tint = app.settings.opacity;
     let canvas = [app.canvas_size.0 as f32, app.canvas_size.1 as f32];
     let contour = crate::shape::ShapeContour::new(
-        app.springs[0].position,
-        app.springs[1].position,
-        app.springs[2].position,
+        f64::from(ui.get_shape_width()),
+        f64::from(ui.get_shape_height()),
+        f64::from(ui.get_shape_radius()),
         app.settings.form_factor,
     );
     let sample_key = (revision, tint.to_bits());
@@ -202,16 +300,38 @@ fn render_liquid(
         tint,
         optics: app.settings.liquid_glass,
         sample_y: app.slide.position as f32,
+        controls: surfaces.borrow().collect(ui, canvas),
+        motion_speed: if app.animations_enabled() {
+            app.settings.animation_speed as f32
+        } else {
+            0.
+        },
     };
-    if let Some(image) = worker
-        .as_mut()
-        .unwrap()
-        .update(&backdrop, revision, layout)?
-    {
+    let worker = worker.as_mut().unwrap();
+    if let Some(frame) = worker.update(&backdrop, revision, &layout)? {
         ui.set_liquid_dark_backdrop(glass.palette.dark);
         ui.set_gpu_material(true);
-        ui.set_glass_texture(image);
+        ui.set_glass_texture(frame.shell);
         ui.set_has_glass_texture(true);
+        if let Some(controls) = frame.controls {
+            ui.set_surface_glass_texture(controls);
+        }
+    }
+    let global = ui.global::<LiquidSurfaces>();
+    let valid_controls = worker.controls_match(&layout);
+    let count = if valid_controls {
+        layout.controls.len() as i32
+    } else {
+        0
+    };
+    if count != global.get_rendered_count() {
+        global.set_rendered_count(count);
+    }
+    if valid_controls != global.get_ready() {
+        global.set_ready(valid_controls);
+        if !valid_controls {
+            ui.set_surface_glass_texture(slint::Image::default());
+        }
     }
     Ok(())
 }
@@ -420,9 +540,7 @@ pub(super) fn configure_material(app: &Rc<RefCell<App>>) {
         ) {
             a.glass.borrow_mut().clear();
             if let Some(ui) = a.ui.upgrade() {
-                ui.set_gpu_material(false);
-                ui.set_glass_texture(slint::Image::default());
-                ui.set_has_glass_texture(false);
+                clear_image(&ui);
                 ui.window().request_redraw();
             }
         }
@@ -445,6 +563,13 @@ pub(super) fn configure_material(app: &Rc<RefCell<App>>) {
     if let Err(error) = platform::set_appearance(appearance) {
         record(&format!("Native backdrop configuration failed: {error}"));
     }
+    if verification_isolated_material()
+        && verification::has_arg("--verify-control-center")
+        && !verification::has_arg("--verify-live-material")
+    {
+        // The owned renderer fixture supplies its own light and dark frames.
+        return;
+    }
     if !uses_live_capture(appearance) {
         if let Err(error) = platform::exclude_from_capture(false) {
             record(&format!("Could not restore normal capture: {error}"));
@@ -457,9 +582,7 @@ pub(super) fn configure_material(app: &Rc<RefCell<App>>) {
     if let Err(error) = platform::exclude_from_capture(true) {
         app.borrow().glass.borrow_mut().clear();
         if let Some(ui) = app.borrow().ui.upgrade() {
-            ui.set_gpu_material(false);
-            ui.set_glass_texture(slint::Image::default());
-            ui.set_has_glass_texture(false);
+            clear_image(&ui);
             ui.window().request_redraw();
         }
         record(&format!(

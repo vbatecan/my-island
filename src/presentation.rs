@@ -23,7 +23,7 @@ pub enum Panel {
     Launcher,
     Media,
     Timer,
-    Volume,
+    ControlCenter,
     Battery,
     Plugins,
     Notification(NotificationRecord),
@@ -41,7 +41,7 @@ pub enum Content {
     Media,
     Timer,
     TimerFinished,
-    VolumePanel,
+    ControlCenter,
     BatteryPanel,
     PluginPanel,
     CompactPlugin(PluginActivity),
@@ -73,7 +73,7 @@ impl Presentation {
             Content::Media => IslandState::Media,
             Content::Timer => IslandState::Timer,
             Content::TimerFinished => IslandState::Compact,
-            Content::VolumePanel => IslandState::Volume,
+            Content::ControlCenter => IslandState::ControlCenter,
             Content::BatteryPanel => IslandState::Battery,
             Content::PluginPanel => IslandState::Plugin,
             Content::ExpandedNotification(..) => IslandState::Notification,
@@ -207,7 +207,7 @@ impl PresentationCoordinator {
             Page::Home => Panel::Launcher,
             Page::Media => Panel::Media,
             Page::Timer => Panel::Timer,
-            Page::Volume => Panel::Volume,
+            Page::ControlCenter => Panel::ControlCenter,
             Page::Plugin { .. } => Panel::Plugins,
         }
     }
@@ -216,7 +216,7 @@ impl PresentationCoordinator {
             Page::Home => Content::Idle,
             Page::Media => Content::CompactMedia,
             Page::Timer => Content::CompactTimer,
-            Page::Volume => Content::Volume,
+            Page::ControlCenter => Content::Volume,
             Page::Plugin { id, view } => Content::CompactPluginPage {
                 plugin_id: id.clone(),
                 view_id: view.clone(),
@@ -377,7 +377,7 @@ impl PresentationCoordinator {
                 Content::CompactMedia => Some(Panel::Media),
                 Content::CompactBattery(_) => Some(Panel::Battery),
                 Content::DownloadsPreview(..) => Some(Panel::Launcher),
-                Content::Volume => Some(Panel::Volume),
+                Content::Volume => Some(Panel::ControlCenter),
                 Content::CompactPlugin(_) | Content::CompactPluginPage { .. } => {
                     Some(Panel::Plugins)
                 }
@@ -416,6 +416,12 @@ impl PresentationCoordinator {
                 },
                 now,
             );
+            self.hover_panel = true;
+        }
+    }
+    pub fn open_default(&mut self, now: u64) {
+        if self.panel.is_none() {
+            self.open(Panel::ControlCenter, now);
             self.hover_panel = true;
         }
     }
@@ -625,7 +631,7 @@ impl PresentationCoordinator {
                 Panel::Launcher => Content::Launcher,
                 Panel::Media => Content::Media,
                 Panel::Timer => Content::Timer,
-                Panel::Volume => Content::VolumePanel,
+                Panel::ControlCenter => Content::ControlCenter,
                 Panel::Battery => Content::BatteryPanel,
                 Panel::Plugins => Content::PluginPanel,
                 Panel::Notification(record) => Content::ExpandedNotification(record.clone()),
@@ -782,7 +788,7 @@ mod tests {
         assert_eq!(c.view(5000).content, Content::Media);
         c.close(11_000);
         assert_eq!(c.view(11_000).content, Content::Idle);
-        c.open(Panel::Volume, 12_000);
+        c.open(Panel::ControlCenter, 12_000);
         c.plugin_activity(plugin("other"), 12_001);
         c.close(12_500);
         assert!(matches!(c.view(12_500).content, Content::CompactPlugin(_)));
@@ -975,9 +981,9 @@ mod tests {
     fn explicit_navigation_survives_pointer_leaving() {
         let mut c = PresentationCoordinator::default();
         c.open_hover(0);
-        c.open(Panel::Volume, 10);
+        c.open(Panel::ControlCenter, 10);
         c.close_hover(20);
-        assert_eq!(c.view(20).content, Content::VolumePanel);
+        assert_eq!(c.view(20).content, Content::ControlCenter);
         c.close(30);
         c.close_hover(40);
         assert_eq!(c.view(40).content, Content::Idle);
@@ -1033,7 +1039,7 @@ mod tests {
         c.set_hover(false, 100_000);
         assert!(matches!(c.view(103999).content, Content::Notification(..)));
         assert_eq!(c.view(104000).content, Content::Idle);
-        c.open(Panel::Volume, 104001);
+        c.open(Panel::ControlCenter, 104001);
         c.push(note(2, "b"), 104002);
         assert_eq!(c.view(164002).pending, 0);
     }

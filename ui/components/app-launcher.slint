@@ -1,4 +1,5 @@
-import { QuietButton, TextButton } from "controls.slint";
+import { Glyph, QuietButton, TextButton } from "controls.slint";
+import { LiquidSurface, LiquidSurfaces } from "liquid-surface.slint";
 
 export struct LauncherResult {
     id: string,
@@ -27,6 +28,7 @@ component LauncherIconButton inherits QuietButton {
 }
 
 component ShortcutField inherits Rectangle {
+    in property <float> glass-exposure;
     in property <bool> light-material;
     in property <bool> active;
     in property <length> layout-pixel;
@@ -49,13 +51,14 @@ component ShortcutField inherits Rectangle {
         font-size: 12 * root.font-pixel;
         overflow: elide;
     }
-    Rectangle {
+    LiquidSurface {
         x: 0px;
         y: root.label-height;
         width: parent.width;
         height: parent.height - self.y;
         border-radius: 6 * root.layout-pixel;
-        background: root.light-material ? #0000000d : #ffffff0d;
+        glass-exposure: root.glass-exposure;
+        background: self.refracted ? transparent : root.light-material ? #0000000d : #ffffff0d;
         border-width: 1px;
         border-color: field.has-focus ? (root.light-material ? #00000048 : #ffffff48) : (root.light-material ? #00000012 : #ffffff12);
         field := TextInput {
@@ -79,6 +82,7 @@ component ShortcutField inherits Rectangle {
 
 // The host owns discovery, selection, ranking, and action execution.
 export component AppLauncher inherits Rectangle {
+    in property <float> glass-exposure;
     in property <bool> light-material: false;
     in property <[LauncherResult]> results;
     in property <bool> busy: false;
@@ -101,6 +105,8 @@ export component AppLauncher inherits Rectangle {
     in property <length> layout-pixel: 1px;
     in-out property <string> query;
     in property <[string]> action-items;
+    changed results => { LiquidSurfaces.invalidate(); }
+    changed action-items => { LiquidSurfaces.invalidate(); }
     in property <string> action-title;
     in property <string> action-status;
     in property <int> action-selected: 0;
@@ -138,11 +144,32 @@ export component AppLauncher inherits Rectangle {
 
     private property <bool> normal-mode: !root.actions-open && !root.shortcut-open;
     private property <bool> empty-results: root.results.length == 0 && !root.answer-visible && !root.answer-editing;
+    private property <bool> empty-message-visible: root.empty-results && (root.file-mode
+        ? root.file-status != "" : root.status-text != "" || root.busy || root.query != "");
+    private property <bool> footer-visible: !root.file-mode && root.status-text != "" && !root.empty-results;
     private property <float> scale: root.layout-pixel / 1px;
-    private property <length> header-height: 48 * root.layout-pixel;
-    private property <float> answer-top: root.answer-action ? 56 : 76;
-    private property <float> answer-height: root.answer-detail == "" ? 64 : 92;
-    private property <length> row-height: min(46 * root.layout-pixel, max(32 * root.layout-pixel, (root.height - (root.answer-visible ? root.answer-top + root.answer-height + 44 : 112) * root.layout-pixel) / (root.answer-visible ? 4 : 6)));
+    private property <length> header-height: max(48 * root.layout-pixel, 26 * root.font-pixel);
+    private property <length> body-top: root.header-height + 10 * root.layout-pixel;
+    private property <length> message-height: max(28 * root.layout-pixel, 31 * root.font-pixel);
+    private property <length> answer-title-height: max(40 * root.layout-pixel, 32 * root.font-pixel);
+    private property <length> answer-detail-height: root.answer-detail == "" ? 0px : max(28 * root.layout-pixel, 28 * root.font-pixel);
+    private property <length> answer-height: 16 * root.layout-pixel + root.answer-title-height + root.answer-detail-height;
+    private property <bool> answer-ready: root.normal-mode && root.answer-visible && !root.answer-busy && !root.answer-error;
+    private property <int> result-count: min(root.results.length, root.answer-visible ? 4 : 6);
+    private property <length> row-height: max(42 * root.layout-pixel, root.result-text-height + 10 * root.layout-pixel);
+    private property <length> results-top: root.body-top + (root.answer-visible ? root.answer-height + 8 * root.layout-pixel :
+        root.answer-slow ? root.message-height + 6 * root.layout-pixel : 0px);
+    private property <length> action-row-height: max(36 * root.layout-pixel, 22 * root.font-pixel);
+    private property <length> action-rows-height: root.action-items.length * (root.action-row-height + 2 * root.layout-pixel);
+    private property <length> main-bottom: root.result-count > 0 ? root.results-top + root.result-count * root.row-height :
+        root.answer-visible ? root.body-top + root.answer-height :
+        root.answer-slow || root.empty-message-visible ? root.body-top + root.message-height : root.header-height;
+    private property <length> status-gap: 6 * root.layout-pixel;
+    out property <length> content-height: root.shortcut-open
+        ? root.body-top + save-button.y + save-button.height + (root.action-status == "" ? 0px : root.status-gap + root.message-height)
+        : root.actions-open
+            ? root.body-top + root.action-rows-height + (root.action-status == "" ? 0px : root.status-gap + root.message-height)
+            : root.main-bottom + (root.footer-visible ? root.status-gap + root.message-height : 0px);
     private property <float> answer-reveal: root.answer-visible ? 1 : 0;
     animate answer-reveal { duration: root.animations-enabled ? 140ms / min(2, max(0.5, root.animation-speed)) : 0ms; easing: ease-out; }
     private property <length> title-height: max(18 * root.layout-pixel, 15 * root.font-pixel);
@@ -160,15 +187,16 @@ export component AppLauncher inherits Rectangle {
         clicked => { if !root.shortcut-open { root.focus-search(); } }
     }
 
-    search-box := Rectangle {
+    search-box := LiquidSurface {
         x: 0px;
         y: 0px;
         width: parent.width;
         height: root.header-height;
         visible: root.normal-mode;
         border-radius: 8 * root.layout-pixel;
-        background: (root.light-material ? #0000000d : #ffffff0d);
-        border-width: 1px;
+        glass-exposure: self.visible ? root.glass-exposure : 0;
+        background: self.refracted ? transparent : (root.light-material ? #0000000d : #ffffff0d);
+        border-width: self.refracted && !search.has-focus ? 0px : 1px;
         border-color: search.has-focus ? #ffffff25 : #ffffff10;
         Text {
             x: 14 * root.layout-pixel;
@@ -188,7 +216,7 @@ export component AppLauncher inherits Rectangle {
             height: parent.height;
             text: "Search apps, settings, or calculate";
             font-size: 16 * root.font-pixel;
-            color: (root.light-material ? #4b4b54 : #71717b);
+            color: (root.light-material ? #4b4b54 : #a1a1ad);
             vertical-alignment: center;
             overflow: elide;
         }
@@ -215,6 +243,7 @@ export component AppLauncher inherits Rectangle {
             }
         }
         more-actions := LauncherIconButton {
+            glass-exposure: search-box.glass-exposure; glass-layer: 1;
             x: parent.width - self.width - 6 * root.layout-pixel;
             y: (parent.height - self.height) / 2;
             width: 36 * root.layout-pixel;
@@ -237,6 +266,7 @@ export component AppLauncher inherits Rectangle {
         height: root.header-height;
         visible: !root.normal-mode;
         LauncherIconButton {
+            glass-exposure: subview-header.visible ? root.glass-exposure : 0;
             x: 0px;
             y: (parent.height - self.height) / 2;
             width: 36 * root.layout-pixel;
@@ -264,7 +294,7 @@ export component AppLauncher inherits Rectangle {
 
     menu := Rectangle {
         x: 0px;
-        y: subview-header.height + 8 * root.layout-pixel;
+        y: root.body-top;
         width: parent.width;
         height: max(0px, parent.height - self.y);
         visible: root.actions-open && !root.shortcut-open;
@@ -281,11 +311,12 @@ export component AppLauncher inherits Rectangle {
                 return root.handle-panel-key(event);
             }
         }
-        for label[index] in root.action-items : Rectangle {
+        for label[index] in root.action-items : LiquidSurface {
+            glass-exposure: menu.visible ? root.glass-exposure : 0; glass-pressed: action-pointer.pressed;
             x: 0px;
             y: index * (self.height + 2 * root.layout-pixel);
             width: parent.width;
-            height: max(36 * root.layout-pixel, 22 * root.font-pixel);
+            height: root.action-row-height;
             border-radius: 6 * root.layout-pixel;
             background: root.action-selected == index ? (root.light-material ? #00000016 : #ffffff16) : action-pointer.has-hover ? (root.light-material ? #0000000c : #ffffff0c) : transparent;
             accessible-role: button;
@@ -307,9 +338,9 @@ export component AppLauncher inherits Rectangle {
             }
         }
         if root.action-status != "" : Text {
-            y: max(0px, parent.height - 48 * root.layout-pixel);
+            y: root.action-rows-height + root.status-gap;
             width: parent.width;
-            height: parent.height - self.y;
+            height: root.message-height;
             text: root.action-status;
             color: root.light-material ? #4b4b54 : #b5b5c0;
             font-size: 12 * root.font-pixel;
@@ -320,11 +351,12 @@ export component AppLauncher inherits Rectangle {
 
     editor := Rectangle {
         x: 0px;
-        y: subview-header.height + 8 * root.layout-pixel;
+        y: root.body-top;
         width: parent.width;
         height: max(0px, parent.height - self.y);
         visible: root.shortcut-open;
         alias-field := ShortcutField {
+            glass-exposure: editor.visible ? root.glass-exposure : 0;
             x: 0px;
             y: 0px;
             width: parent.width;
@@ -338,6 +370,7 @@ export component AppLauncher inherits Rectangle {
             accepted => { if root.shortcut-target == "" { target-field.focus-input(); } else { root.save(); } }
         }
         target-field := ShortcutField {
+            glass-exposure: editor.visible ? root.glass-exposure : 0;
             x: 0px;
             y: alias-field.height + 14 * root.layout-pixel;
             width: parent.width;
@@ -351,6 +384,7 @@ export component AppLauncher inherits Rectangle {
             accepted => { root.save(); }
         }
         save-button := TextButton {
+            glass-exposure: editor.visible ? root.glass-exposure : 0;
             x: parent.width - self.width;
             y: target-field.y + target-field.height + 12 * root.layout-pixel;
             width: max(96 * root.layout-pixel, 76 * root.font-pixel);
@@ -374,9 +408,9 @@ export component AppLauncher inherits Rectangle {
         }
         if root.action-status != "" : Text {
             x: 0px;
-            y: save-button.y + save-button.height + 10 * root.layout-pixel;
+            y: save-button.y + save-button.height + root.status-gap;
             width: parent.width;
-            height: max(0px, parent.height - self.y);
+            height: root.message-height;
             text: root.action-status;
             color: root.light-material ? #4b4b54 : #b5b5c0;
             font-size: 12 * root.font-pixel;
@@ -386,30 +420,35 @@ export component AppLauncher inherits Rectangle {
     }
 
     if root.normal-mode && root.answer-slow : Text {
-        y: 76 * root.layout-pixel; width: parent.width; height: 28 * root.layout-pixel;
+        y: root.body-top; width: parent.width; height: root.message-height;
         text: "Looking up exchange rate…"; font-size: 15 * root.font-pixel;
         color: root.light-material ? #4b4b54 : #b5b5c0;
+        vertical-alignment: center;
     }
-    answer-card := Rectangle {
+    answer-card := LiquidSurface {
+        glass-exposure: self.visible ? root.glass-exposure * root.answer-reveal : 0;
+        glass-pressed: answer-pointer.pressed;
+        private property <bool> highlighted: root.answer-ready && (answer-pointer.has-hover || (root.selected-index == -1 && search.has-focus));
         accessible-role: button;
-        accessible-label: root.answer-action ? root.answer-value : "Copy " + root.answer-value;
-        accessible-action-default => { if root.normal-mode && root.answer-visible && !root.answer-busy && !root.answer-error { root.activate(-1); } }
+        accessible-enabled: root.answer-ready;
+        accessible-label: root.answer-error ? "Result unavailable" : root.answer-action ? root.answer-value : "Copy " + root.answer-value;
+        accessible-action-default => { if root.answer-ready { root.activate(-1); } }
         x: 0px;
-        y: (root.answer-top + 5 * (1 - root.answer-reveal)) * root.layout-pixel;
+        y: root.body-top + 4 * (1 - root.answer-reveal) * root.layout-pixel;
         width: parent.width;
-        height: root.answer-height * root.layout-pixel;
-        visible: root.normal-mode && !root.file-mode && root.answer-reveal > 0.001;
+        height: root.answer-height;
+        visible: root.normal-mode && !root.file-mode && root.answer-visible && !root.answer-busy && root.answer-reveal > 0.001;
         opacity: root.answer-reveal;
         border-radius: 8 * root.layout-pixel;
         border-width: 1px;
-        border-color: root.selected-index == -1 ? #ffffff30 : #ffffff12;
-        background: root.selected-index == -1 ? (root.light-material ? #00000013 : #ffffff13) : (root.light-material ? #00000009 : #ffffff09);
+        border-color: self.highlighted ? (root.light-material ? #00000036 : #ffffff36) : (root.light-material ? #00000016 : #ffffff16);
+        background: self.highlighted ? (root.light-material ? #00000013 : #ffffff13) : self.refracted ? transparent : (root.light-material ? #00000009 : #ffffff09);
         clip: true;
         Text {
             x: 14 * root.layout-pixel;
-            y: 10 * root.layout-pixel;
-            width: parent.width - 28 * root.layout-pixel;
-            height: 40 * root.layout-pixel;
+            y: 8 * root.layout-pixel;
+            width: max(0px, parent.width - (root.answer-ready ? 62 : 28) * root.layout-pixel);
+            height: root.answer-title-height;
             text: root.answer-busy ? "" : root.answer-error ? "Result unavailable" : root.answer-value;
             color: root.answer-error ? (root.light-material ? #4b4b54 : #b5b5c0) : (root.light-material ? #202024 : #f5f5f7);
             font-size: (root.answer-busy || root.answer-error || root.answer-action ? 15 : 25) * root.font-pixel;
@@ -418,30 +457,40 @@ export component AppLauncher inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        Text {
+        if root.answer-detail != "" : Text {
             x: 14 * root.layout-pixel;
-            y: 53 * root.layout-pixel;
+            y: 8 * root.layout-pixel + root.answer-title-height;
             width: parent.width - 28 * root.layout-pixel;
-            height: 29 * root.layout-pixel;
+            height: root.answer-detail-height;
             text: root.answer-detail;
-            color: (root.light-material ? #4b4b54 : #9999a5);
-            font-size: 10 * root.font-pixel;
+            color: root.light-material ? #4b4b54 : #b5b5c0;
+            font-size: 11 * root.font-pixel;
             vertical-alignment: center;
+            wrap: word-wrap;
             overflow: elide;
         }
-        TouchArea {
-            enabled: root.answer-visible && !root.answer-busy && !root.answer-error;
+        if answer-card.highlighted : Glyph {
+            light-material: root.light-material; ui-scale: root.scale;
+            x: parent.width - 48 * root.layout-pixel;
+            y: 8 * root.layout-pixel;
+            width: 36 * root.layout-pixel;
+            height: root.answer-title-height;
+            text: root.answer-action ? "\u{e72a}" : "\u{e8c8}";
+        }
+        answer-pointer := TouchArea {
+            enabled: root.answer-ready;
             mouse-cursor: pointer;
             clicked => { root.activate(-1); }
         }
     }
 
-    for item[index] in root.results : Rectangle {
+    for item[index] in root.results : LiquidSurface {
+        glass-exposure: self.visible ? root.glass-exposure : 0; glass-pressed: row-pointer.pressed;
         x: 0px;
-        y: (root.answer-visible ? root.answer-top + root.answer-height + 12 : 60) * root.layout-pixel + index * root.row-height;
+        y: root.results-top + index * root.row-height;
         width: parent.width;
         height: root.row-height - 2 * root.layout-pixel;
-        visible: root.normal-mode && index < (root.answer-visible ? 4 : 6);
+        visible: root.normal-mode && index < root.result-count;
         border-radius: 6 * root.layout-pixel;
         background: root.selected-index == index ? (root.light-material ? #00000016 : #ffffff16) : row-pointer.has-hover ? (root.light-material ? #0000000c : #ffffff0c) : transparent;
         clip: true;
@@ -474,7 +523,7 @@ export component AppLauncher inherits Rectangle {
         Text {
             x: 52 * root.layout-pixel;
             y: item.detail == "" ? 0px : max(0px, (parent.height - root.result-text-height) / 2);
-            width: parent.width - self.x - (root.file-mode ? 10 : 50) * root.layout-pixel;
+            width: max(0px, parent.width - self.x - 50 * root.layout-pixel);
             height: item.detail == "" ? parent.height : root.title-height;
             text: item.title;
             color: (root.light-material ? #202024 : #efeff3);
@@ -486,7 +535,7 @@ export component AppLauncher inherits Rectangle {
         if item.detail != "" : Text {
             x: 52 * root.layout-pixel;
             y: max(0px, (parent.height - root.result-text-height) / 2) + root.title-height;
-            width: parent.width - self.x - (root.file-mode ? 10 : 50) * root.layout-pixel;
+            width: max(0px, parent.width - self.x - 50 * root.layout-pixel);
             height: root.detail-height;
             text: item.detail;
             color: (root.light-material ? #4b4b54 : #84848e);
@@ -494,16 +543,14 @@ export component AppLauncher inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        if !root.file-mode && root.selected-index == index : Text {
+        if row-pointer.has-hover || (root.selected-index == index && search.has-focus) : Glyph {
+            light-material: root.light-material; ui-scale: root.scale;
             x: parent.width - 44 * root.layout-pixel;
             y: 0px;
             width: 36 * root.layout-pixel;
             height: parent.height;
-            text: "Enter";
-            color: (root.light-material ? #4b4b54 : #9a9aa5);
-            font-size: 9 * root.font-pixel;
-            horizontal-alignment: right;
-            vertical-alignment: center;
+            text: "\u{e72a}";
+            font-size: 13 * root.font-pixel;
         }
         row-pointer := TouchArea {
             mouse-cursor: pointer;
@@ -516,29 +563,30 @@ export component AppLauncher inherits Rectangle {
         }
     }
 
-    if root.normal-mode && root.empty-results && (!root.file-mode || root.file-status != "") : Text {
-        x: 12 * root.layout-pixel;
-        y: 104 * root.layout-pixel;
-        width: parent.width - 24 * root.layout-pixel;
-        height: max(0px, parent.height - 156 * root.layout-pixel);
+    if root.normal-mode && root.empty-message-visible : Text {
+        x: 6 * root.layout-pixel;
+        y: root.body-top;
+        width: parent.width - 12 * root.layout-pixel;
+        height: root.message-height;
         text: root.file-mode ? root.file-status :
             root.status-text != "" ? root.status-text : root.busy ? "Preparing your applications…" : "No results";
         color: (root.light-material ? #4b4b54 : #a1a1ad);
         font-size: 12 * root.font-pixel;
-        horizontal-alignment: center;
         vertical-alignment: center;
         wrap: word-wrap;
+        overflow: elide;
     }
 
-    if root.normal-mode && !root.file-mode && root.status-text != "" && !root.empty-results : Text {
-        x: 0px;
-        y: parent.height - 21 * root.layout-pixel;
-        height: 17 * root.layout-pixel;
-        width: parent.width;
+    if root.normal-mode && root.footer-visible : Text {
+        x: 6 * root.layout-pixel;
+        y: root.main-bottom + root.status-gap;
+        height: root.message-height;
+        width: parent.width - 12 * root.layout-pixel;
         text: root.status-text;
-        font-size: 9 * root.font-pixel;
-        color: (root.light-material ? #4b4b54 : #92929d);
+        font-size: 12 * root.font-pixel;
+        color: (root.light-material ? #4b4b54 : #b5b5c0);
         vertical-alignment: center;
+        wrap: word-wrap;
         overflow: elide;
     }
 }

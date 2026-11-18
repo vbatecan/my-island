@@ -1,9 +1,11 @@
 import { Button, CheckBox, ComboBox, LineEdit, ScrollView, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
+import { LiquidSurface, LiquidSurfaces } from "components/liquid-surface.slint";
 export struct PluginListEntry { id:string, label:string, status:string, enabled:bool, error:string }
 export struct PluginActionEntry { plugin-id:string, id:string, label:string, pinned:bool }
 export struct PluginConfigEntry { id:string, label:string, kind:string, value:string, checked:bool, choices:[string], choice-index:int }
 export struct PluginVisualNode { id:string, kind:string, text:string, action:string, x:float, y:float, width:float, height:float, value:float, checked:bool, image:image, accent:color, font-size:float, font-weight:int }
 export component PluginView inherits Rectangle {
+    in property <float> glass-exposure;
     in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     in property <float> text-scale: 1;
@@ -13,6 +15,7 @@ export component PluginView inherits Rectangle {
     in property <bool> editable: false;
     callback action(string,string);
     callback edit-requested();
+    changed nodes => { LiquidSurfaces.invalidate(); }
     clip: true;
     ScrollView {
         horizontal-scrollbar-policy: always-off;
@@ -20,34 +23,47 @@ export component PluginView inherits Rectangle {
         content-width: self.width; content-height: max(self.height, root.content-height * root.scaled-pixel * root.text-scale);
         for item in root.nodes : Rectangle {
             x: item.x * root.scaled-pixel; y: item.y * root.scaled-pixel * root.text-scale; width: item.width * root.scaled-pixel; height: item.height * root.scaled-pixel * root.text-scale;
+            private property <float> optical-exposure: self.absolute-position.y >= root.absolute-position.y
+                && self.absolute-position.y + self.height <= root.absolute-position.y + root.height
+                ? root.glass-exposure : 0;
             clip: true;
             if item.kind == "text" : Text { text: item.text; color: root.light-material ? #202024 : item.accent; font-size: (max(1,item.font-size) * root.scaled-pixel * root.text-scale); font-weight: item.font-weight; wrap: word-wrap; overflow: elide; vertical-alignment: top; }
             if item.kind == "image" : Image { source: item.image; image-fit: contain; }
-            if item.kind == "button" : Rectangle {
+            if item.kind == "button" : LiquidSurface {
+                glass-exposure: parent.optical-exposure; glass-pressed: touch.pressed;
                 accessible-role: AccessibleRole.button;
                 accessible-label: item.text;
-                border-radius: (5 * root.scaled-pixel); background: touch.pressed ? (root.light-material ? #0000002c : #ffffff2c) : touch.has-hover ? (root.light-material ? #00000020 : #ffffff20) : (root.light-material ? #0000000e : #ffffff0e); border-width: root.scaled-pixel; border-color: #ffffff0c;
+                border-radius: (5 * root.scaled-pixel); background: touch.pressed ? (root.light-material ? #0000002c : #ffffff2c) : touch.has-hover ? (root.light-material ? #00000020 : #ffffff20) : self.refracted ? transparent : (root.light-material ? #0000000e : #ffffff0e); border-width: self.refracted ? 0px : root.scaled-pixel; border-color: #ffffff0c;
                 Text { text: item.text; color: (root.light-material ? #202024 : white); font-size: (11 * (root.scaled-pixel * root.text-scale)); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                 touch := TouchArea { mouse-cursor: pointer; clicked => { root.action(item.action, ""); } }
             }
-            if item.kind == "progress" : Rectangle { y: (parent.height - (4 * root.scaled-pixel)) / 2; height: (4 * root.scaled-pixel); background: (root.light-material ? #00000017 : #ffffff17); border-radius: (2 * root.scaled-pixel);
+            if item.kind == "progress" : LiquidSurface { glass-exposure: parent.optical-exposure; y: (parent.height - (4 * root.scaled-pixel)) / 2; height: (4 * root.scaled-pixel); background: self.refracted ? transparent : (root.light-material ? #00000017 : #ffffff17); border-radius: (2 * root.scaled-pixel);
                 Rectangle { x: 0px; y: 0px; width: parent.width * min(1,max(0,item.value)); height: (4 * root.scaled-pixel); background: item.accent; border-radius: (2 * root.scaled-pixel); }
             }
-            if item.kind == "toggle" : CheckBox { font-size: 12 * (root.scaled-pixel * root.text-scale); text: item.text; checked: item.checked; toggled => { root.action(item.action,self.checked ? "true" : "false"); } }
+            if item.kind == "toggle" : LiquidSurface {
+                glass-exposure: parent.optical-exposure;
+                border-radius: 5 * root.scaled-pixel;
+                CheckBox {
+                    width: parent.width; height: parent.height;
+                    font-size: 12 * (root.scaled-pixel * root.text-scale); text: item.text; checked: item.checked;
+                    toggled => { root.action(item.action,self.checked ? "true" : "false"); }
+                }
+            }
             if item.kind == "input" && root.editable : LineEdit { font-size: 12 * (root.scaled-pixel * root.text-scale); text: item.text; accessible-label: item.id; accepted => { root.action(item.action,self.text); } }
-            if item.kind == "input" && !root.editable : Rectangle {
+            if item.kind == "input" && !root.editable : LiquidSurface {
+                glass-exposure: parent.optical-exposure; glass-pressed: input-touch.pressed;
                 accessible-role: AccessibleRole.button;
                 accessible-label: "Edit " + item.id;
-                border-radius: (5 * root.scaled-pixel); background: (root.light-material ? #00000014 : #ffffff14);
+                border-radius: (5 * root.scaled-pixel); background: self.refracted ? transparent : (root.light-material ? #00000014 : #ffffff14);
                 Text { text: item.text == "" ? "Edit input…" : item.text; color: (root.light-material ? #202024 : #ccccd5); font-size: (11 * (root.scaled-pixel * root.text-scale)); overflow: elide; vertical-alignment: center; }
-                TouchArea { clicked => { root.edit-requested(); } }
+                input-touch := TouchArea { clicked => { root.edit-requested(); } }
             }
         }
     }
 }
 export component PluginManagerWindow inherits Window {
     in property <bool> light-material: false;
-    title: "Still Island Integrations"; preferred-width: 660px; preferred-height: 720px; min-width: 600px; min-height: 580px;
+    title: "Still Island Add-ons"; preferred-width: 660px; preferred-height: 720px; min-width: 600px; min-height: 580px;
     background: (root.light-material ? #f0f0f4 : #17171b); default-font-family: "Segoe UI Variable"; default-font-size: 12px;
     in property <[PluginListEntry]> plugins;
     in property <[PluginConfigEntry]> fields;
@@ -64,7 +80,7 @@ export component PluginManagerWindow inherits Window {
     callback pin-action(string,string,bool); callback invoke(string,string); callback open-view(); callback close-window();
     init => { Palette.color-scheme = dark; }
     VerticalBox { padding: 20px; spacing: 12px;
-        Text { text: "Integrations"; color: (root.light-material ? #202024 : white); font-size: 24px; font-weight: 600; vertical-stretch: 0; }
+        Text { text: "Add-ons"; color: (root.light-material ? #202024 : white); font-size: 24px; font-weight: 600; vertical-stretch: 0; }
         Text { text: "Plugins are trusted programs with your Windows account access. Importing does not run them. Enable only programs you trust."; color: (root.light-material ? #4b4b54 : #aaaab5); wrap: word-wrap; vertical-stretch: 0; }
         HorizontalBox {
             LineEdit { placeholder-text: "Plugin package (.zip)"; text <=> root.package-path; }
@@ -83,7 +99,7 @@ export component PluginManagerWindow inherits Window {
             }
             ScrollView {
                 VerticalBox { padding: 8px; spacing: 9px;
-                    Text { text: root.selected-label == "" ? "Select an integration" : root.selected-label; color: (root.light-material ? #202024 : white); font-size: 18px; font-weight: 600; vertical-stretch: 0; }
+                    Text { text: root.selected-label == "" ? "Select an add-on" : root.selected-label; color: (root.light-material ? #202024 : white); font-size: 18px; font-weight: 600; vertical-stretch: 0; }
                     if root.selected-id != "" : HorizontalBox {
                         Button { text: "Enable"; clicked => { root.enable-plugin(root.selected-id,true); } }
                         Button { text: "Disable"; clicked => { root.enable-plugin(root.selected-id,false); } }
@@ -103,7 +119,7 @@ export component PluginManagerWindow inherits Window {
                     if root.selected-id != "" && root.fields.length > 0 : Button { text: "Save configuration"; clicked => { root.save-config(); } }
                     Text { text: "Quick actions"; color: (root.light-material ? #202024 : #d0d0da); vertical-stretch: 0; }
                     for item in root.actions : CheckBox { text: "Pin " + item.label; checked: item.pinned; toggled => { root.pin-action(item.plugin-id,item.id,self.checked); } }
-                    if root.selected-id != "" : Button { text: "Open integration view"; clicked => { root.open-view(); } }
+                    if root.selected-id != "" : Button { text: "Open add-on"; clicked => { root.open-view(); } }
                     PluginView { light-material: root.light-material; height: 190px; nodes: root.nodes; content-height: root.view-height; editable: true; action(id,value) => { root.invoke(id,value); } }
                     if root.selected-id != "" : Button { enabled: !root.busy; text: "Remove plugin"; clicked => { root.remove-plugin(root.selected-id); } }
                 }

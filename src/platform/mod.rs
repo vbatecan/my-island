@@ -5,9 +5,12 @@ pub use windows::*;
 mod display;
 pub use display::{MonitorInfo, monitors};
 
+pub mod brightness;
 pub mod capture;
+pub mod control_devices;
 pub mod file_dialog;
 pub mod file_search;
+pub mod hotspot;
 pub mod launcher;
 pub mod power;
 pub mod startup;

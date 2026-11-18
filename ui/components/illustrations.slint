@@ -14,6 +14,7 @@ export component RollingTime inherits Rectangle {
     }
 }
 export component WavyProgress inherits Rectangle {
+    in property <float> glass-exposure;
     in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     in property <float> value;
@@ -23,7 +24,7 @@ export component WavyProgress inherits Rectangle {
     in property <bool> show-thumb: false;
     in property <color> thumb-color: (root.light-material ? #202024 : white);
     height: 3px * root.ui-scale;
-    ProgressTrack { light-material: root.light-material; width: parent.width; height: parent.height; ui-scale: root.ui-scale; value: root.value; track-color: transparent; fill-color: transparent; show-thumb: root.show-thumb; thumb-color: root.thumb-color; }
+    ProgressTrack { glass-exposure: root.glass-exposure; light-material: root.light-material; width: parent.width; height: parent.height; ui-scale: root.ui-scale; value: root.value; track-color: transparent; fill-color: transparent; show-thumb: root.show-thumb; thumb-color: root.thumb-color; }
     Rectangle { x: parent.width * min(1, max(0, root.value)); width: parent.width - self.x; height: parent.height; border-radius: self.height / 2; background: root.track-color; }
     Path { y: parent.height / 2 - 5px * root.ui-scale; width: parent.width; height: 10px * root.ui-scale; viewbox-width: parent.width / (1px * root.ui-scale); viewbox-height: 10; commands: root.wave; stroke: root.fill-color; stroke-width: 2px * root.ui-scale; fill: transparent; }
 }

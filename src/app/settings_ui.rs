@@ -174,6 +174,9 @@ pub(super) fn apply_settings(app: &Rc<RefCell<App>>, mut settings: Settings, per
         startup::request(app, settings.launch_at_startup);
     }
     sync_presentation(app);
+    if old.monitor_id != settings.monitor_id {
+        control_center::refresh_display(app);
+    }
     if app.borrow().launcher.open
         && (old.launcher_windows != settings.launcher_windows
             || old.launcher_calculator != settings.launcher_calculator

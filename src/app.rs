@@ -2,6 +2,8 @@ mod artwork;
 mod battery_effect;
 mod battery_verification;
 mod contracted_verification;
+mod control_center;
+mod control_center_verification;
 mod downloads;
 mod hover_morph_verification;
 mod illustration_verification;
@@ -26,6 +28,7 @@ mod startup;
 mod verification;
 mod visibility;
 mod volume;
+mod welcome;
 
 use interaction::handle_overlay_input;
 use material::{configure_material, refresh_eco_glass};
@@ -35,7 +38,7 @@ use settings_ui::{
 };
 use verification::record;
 
-use crate::animation::choreography::{compact_space, expanded_space};
+use crate::animation::choreography::{compact_space, expanded_space, launcher_space};
 use crate::{IslandWindow, animation::Spring, platform, settings::Settings, state::IslandState};
 use crate::{
     SettingsWindow,
@@ -75,6 +78,7 @@ struct App {
     state: IslandState,
     springs: [Spring; 5],
     slide: Spring,
+    page_motion: liquid_rust::Animated,
     timer: slint::Timer,
     last: Instant,
     reduced_motion: bool,
@@ -113,6 +117,9 @@ struct App {
     hover_timer: slint::Timer,
     collapse_timer: slint::Timer,
     page_switch_timer: slint::Timer,
+    pending_page: Option<crate::navigation::Page>,
+    panel_keyboard: bool,
+    control_center: control_center::Controller,
     page_wheel: pages::PageWheel,
     hover_intent: crate::hover::HoverIntent,
     pointer: Option<(f64, f64)>,
@@ -122,6 +129,7 @@ struct App {
     countdown_timer: slint::Timer,
     countdown_engaged: bool,
     countdown_revision: u64,
+    welcome_hint: bool,
     hidden: bool,
     visibility: visibility::Visibility,
     settings_visible: bool,
@@ -165,8 +173,8 @@ impl App {
         {
             self.apply_pending_presentation();
         }
-        let g = self.geometry(state);
-        self.update_media_layout();
+        let g = self.target_geometry(state);
+        self.update_panel_layouts();
         let collapsing = self.visibility.hiding || g.height < self.springs[1].position;
         for spring in &mut self.springs[..3] {
             spring.config.damping = self.settings.bounce.damping(collapsing);
@@ -222,26 +230,36 @@ impl App {
                 spring.snap(spring.target);
             }
             self.springs[3].snap(if state.is_expanded() { 1.0 } else { 0.0 });
-            self.springs[4].snap(
-                if matches!(state, IslandState::Compact | IslandState::Volume) {
-                    1.0
-                } else {
-                    0.0
-                },
-            );
+            self.springs[4].snap(if state == IslandState::Compact {
+                1.0
+            } else {
+                0.0
+            });
             self.apply_content();
             self.apply_compact();
             self.render();
         }
     }
     fn geometry(&self, state: IslandState) -> crate::state::Geometry {
-        let screen = platform::available_width() / self.settings.island_scale;
+        let screen = if state == IslandState::ControlCenter {
+            self.control_center
+                .verification_width
+                .unwrap_or_else(|| platform::available_width() / self.settings.island_scale)
+        } else {
+            platform::available_width() / self.settings.island_scale
+        };
+        let mut sizes = self.settings.sizes();
+        if state == IslandState::Idle && self.welcome_hint {
+            sizes.contracted_width = sizes
+                .contracted_width
+                .max(welcome::width(self.settings.text_scale));
+        }
         let mut geometry = state.geometry_for_sizes(
             self.settings.form_factor,
             self.settings.notch_corner_radius,
             self.settings.notch_contracted_radius,
             screen,
-            &self.settings.sizes(),
+            &sizes,
         );
         if state == IslandState::Compact
             && matches!(
@@ -263,6 +281,18 @@ impl App {
                 .width
                 .max(lyric_width)
                 .min((screen - shoulders - 4.).max(1.));
+        }
+        geometry
+    }
+    fn target_geometry(&self, state: IslandState) -> crate::state::Geometry {
+        let mut geometry = self.geometry(state);
+        if state == IslandState::ControlCenter && self.control_center.has_device_view() {
+            geometry.height = crate::state::CONTROL_CENTER_DEVICE_HEIGHT;
+        }
+        if state == IslandState::AppLauncher
+            && let Some(ui) = self.ui.upgrade()
+        {
+            geometry.height = f64::from(ui.get_launcher_height()).ceil();
         }
         geometry
     }
@@ -289,13 +319,17 @@ impl App {
         changed
     }
 
-    fn update_media_layout(&self) {
+    fn update_panel_layouts(&self) {
         if let Some(ui) = self.ui.upgrade() {
             let media = self.geometry(IslandState::Media);
             ui.set_media_layout_width(media.width as f32);
             ui.set_media_layout_height(media.height as f32);
             let plugin = self.geometry(IslandState::Plugin);
             ui.set_plugin_layout_width((plugin.width - 48.).max(1.) as f32);
+            let controls = self.geometry(IslandState::ControlCenter);
+            ui.set_control_center_width(controls.width as f32);
+            ui.set_control_center_height(controls.height as f32);
+            ui.set_control_center_wide(controls.width >= crate::state::CONTROL_CENTER_WIDE);
         }
     }
 
@@ -303,8 +337,8 @@ impl App {
     /// Content and all spring velocities survive the change.
     fn retarget_shape(&mut self) {
         self.sync_canvas(false);
-        let g = self.geometry(self.state);
-        self.update_media_layout();
+        let g = self.target_geometry(self.state);
+        self.update_panel_layouts();
         let target = [
             g.width
                 + if self.state == IslandState::Idle && self.hover {
@@ -341,16 +375,11 @@ impl App {
             && let Some(ui) = self.ui.upgrade()
         {
             ui.set_media_mode(state == IslandState::Media);
-            ui.set_volume_mode(state == IslandState::Volume);
         }
     }
     fn apply_compact(&mut self) {
         self.apply_pending_presentation();
-        if let Some(state) = self.pending_compact.take()
-            && let Some(ui) = self.ui.upgrade()
-        {
-            ui.set_volume_mode(state == IslandState::Volume);
-        }
+        self.pending_compact = None;
     }
     fn tick(&mut self) -> bool {
         if self.state == IslandState::Idle
@@ -384,9 +413,13 @@ impl App {
             !self.visibility.hiding && self.pending_content.is_none() && self.state.is_expanded();
         let compact = !self.visibility.hiding
             && self.pending_compact.is_none()
-            && matches!(self.state, IslandState::Compact | IslandState::Volume);
+            && self.state == IslandState::Compact;
         // Space gates are continuous, so a reversal never pops content into a small capsule.
-        self.springs[3].set_target(if expanded {
+        self.springs[3].set_target(if expanded && self.state == IslandState::AppLauncher {
+            launcher_space(self.springs[0].position, self.springs[1].position)
+        } else if expanded && self.state == IslandState::ControlCenter {
+            1.
+        } else if expanded {
             expanded_space(self.springs[0].position, self.springs[1].position)
         } else {
             0.0
@@ -396,10 +429,18 @@ impl App {
         } else {
             0.0
         });
-        let mut active = false;
-        active |= self.slide.advance(dt);
-        for spring in &mut self.springs {
-            active |= spring.advance(dt);
+        let liquid = self.settings.appearance == Appearance::LiquidGlass;
+        let mut active = self.page_motion.step(dt as f32);
+        for spring in self
+            .springs
+            .iter_mut()
+            .chain(std::iter::once(&mut self.slide))
+        {
+            active |= if liquid {
+                spring.advance_liquid(dt)
+            } else {
+                spring.advance(dt)
+            };
         }
         active |= self.pending_presentation.is_some()
             || self.pending_geometry.is_some()
@@ -425,6 +466,7 @@ impl App {
     }
     fn render(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
+        ui.set_welcome_hint(self.welcome_hint);
         ui.set_illustration_visible(!self.hidden && !self.visibility.hiding);
         if self.hidden {
             return;
@@ -435,6 +477,11 @@ impl App {
         ui.set_canvas_width(self.canvas_size.0 as f32);
         ui.set_canvas_height(self.canvas_size.1 as f32);
         ui.set_animation_speed(self.settings.animation_speed as f32);
+        ui.set_liquid_page_opacity(if self.animations_enabled() {
+            self.page_motion.value
+        } else {
+            1.
+        });
         let width = if ui.get_compact_media() {
             let shoulders = if self.settings.form_factor == crate::shape::FormFactor::Notch {
                 16.
@@ -454,6 +501,16 @@ impl App {
             self.springs[0].position
         };
         let height = self.springs[1].position;
+        let progress = if self.state == IslandState::ControlCenter
+            && (self.control_center.has_device_view() || ui.get_control_device_progress() > 0.)
+        {
+            let base = f64::from(ui.get_control_center_height());
+            let span = crate::state::CONTROL_CENTER_DEVICE_HEIGHT - base;
+            ((height - base) / span).clamp(0., 1.) as f32
+        } else {
+            0.
+        };
+        ui.set_control_device_progress(progress);
         let radius = self.springs[2].position;
         let form = self.settings.form_factor;
         let notch = form == crate::shape::FormFactor::Notch;
@@ -479,7 +536,15 @@ impl App {
                 ui.set_glass_rim_path(contour.svg_rim_commands().into());
             }
         }
-        let reveal = self.springs[3].position.clamp(0.0, 1.0) * expanded_space(width, height);
+        let space = if ui.get_app_launcher_mode() {
+            launcher_space(width, height)
+        } else if ui.get_control_center_mode() {
+            // Control Center gates its reveal against its own layout dimensions.
+            1.
+        } else {
+            expanded_space(width, height)
+        };
+        let reveal = self.springs[3].position.clamp(0.0, 1.0) * space;
         ui.set_reveal(reveal as f32);
         ui.set_compact_reveal(
             (self.springs[4].position.clamp(0.0, 1.0) * compact_space(width, height)) as f32,
@@ -642,6 +707,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         settings.hover_expand = true;
         settings.hover_delay = 200;
         settings.collapse_delay = 150;
+        settings.collapse_on_leave = true;
     }
     if verification::has_arg("--benchmark") {
         settings.notifications_enabled = false;
@@ -664,6 +730,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         ui: ui.as_weak(),
         state: IslandState::Idle,
         slide: Spring::new(0.),
+        page_motion: liquid_rust::Animated::new(1., liquid_rust::Spring::EMERGE),
         springs: [
             Spring::new(initial_geometry.width),
             Spring::new(initial_geometry.height),
@@ -713,6 +780,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         hover_timer: slint::Timer::default(),
         collapse_timer: slint::Timer::default(),
         page_switch_timer: slint::Timer::default(),
+        pending_page: None,
+        panel_keyboard: false,
+        control_center: control_center::Controller::default(),
         page_wheel: pages::PageWheel::default(),
         hover_intent: crate::hover::HoverIntent::default(),
         pointer: None,
@@ -722,6 +792,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         countdown_timer: slint::Timer::default(),
         countdown_engaged: false,
         countdown_revision: 0,
+        welcome_hint: false,
         hidden: false,
         visibility: visibility::Visibility::default(),
         settings_visible: false,
@@ -743,7 +814,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.borrow().render();
     {
         let app = app.clone();
-        ui.on_toggle(move || user_toggle(&app));
+        ui.on_toggle(move || user_toggle(&app, false));
+    }
+    {
+        let app = app.clone();
+        ui.on_open_compact_activity(move || {
+            let mut a = app.borrow_mut();
+            let now = a.now();
+            a.coordinator.open_hover(now);
+            drop(a);
+            sync_presentation(&app);
+        });
+    }
+    {
+        let app = app.clone();
+        ui.on_step_page(move |direction| pages::step(&app, direction));
     }
     {
         let app = app.clone();
@@ -751,6 +836,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Services notify the GUI; all remote work stays on their sleeping workers.
     volume::wire(&app, &ui);
+    control_center::wire(&app, &ui);
     media::wire(&app, &ui);
     lyrics::wire(&app, &ui);
     material::wire(&app, &ui);
@@ -761,14 +847,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let app = app.clone();
         ui.on_open_battery(move || transition(&app, IslandState::Battery));
     }
-    let isolated_product_input =
-        verification_isolated_material() && verification::has_arg("--verify-product");
+    let isolated_product_input = verification_isolated_material()
+        && (verification::has_arg("--verify-product")
+            || verification::has_arg("--verify-control-center"));
     let event_app = app.clone();
     platform::set_event_handler(Box::new(move |event| {
         use platform::Event;
         match event {
             // The product fixture drives its own window with local Slint input.
-            Event::ClosePanel | Event::HotkeyToggle | Event::LauncherToggle
+            Event::ClosePanel
+            | Event::OutsidePanelClick
+            | Event::HotkeyToggle
+            | Event::LauncherToggle
                 if isolated_product_input => {}
             Event::Show => {
                 event_app.borrow_mut().visibility.reveal_hover();
@@ -797,6 +887,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 configure_material(&event_app);
                 refresh_preferences(&event_app);
                 event_app.borrow_mut().retarget_shape();
+                control_center::refresh_display(&event_app);
                 wake(&event_app);
                 lyrics::sync(&event_app, false);
                 interaction::refresh_pointer(&event_app);
@@ -806,17 +897,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::BackdropRefresh => refresh_eco_glass(&event_app),
             Event::OpenSettings => show_preferences(&event_app),
-            Event::ClosePanel => {
+            Event::ClosePanel | Event::OutsidePanelClick => {
                 if event_app.borrow().launcher.open {
                     launcher::dismiss(&event_app, false);
                     return;
+                }
+                if matches!(event, Event::OutsidePanelClick) {
+                    let mut a = event_app.borrow_mut();
+                    if !a.settings.outside_click || a.coordinator.pinned() {
+                        let keyboard = std::mem::take(&mut a.panel_keyboard);
+                        drop(a);
+                        if keyboard {
+                            let _ = platform::set_keyboard_mode(false, false);
+                        }
+                        return;
+                    }
                 }
                 if !event_app.borrow().settings_visible && !event_app.borrow().coordinator.pinned()
                 {
                     transition(&event_app, IslandState::Idle);
                 }
             }
-            Event::HotkeyToggle => user_toggle(&event_app),
+            Event::HotkeyToggle => user_toggle(&event_app, true),
             Event::HoverProbe => interaction::hover_probe(&event_app),
             Event::LauncherToggle => launcher::toggle(&event_app),
             Event::EdgeHover(inside) => {
@@ -929,11 +1031,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let state = match state.as_str() {
                     "compact" => IslandState::Compact,
                     "expanded" => IslandState::Expanded,
-                    "volume" => IslandState::Volume,
+                    "volume" | "control-center" => IslandState::ControlCenter,
                     "media" => IslandState::Media,
                     _ => IslandState::Idle,
                 };
                 transition(&init_app, state);
+            } else if !verification::blocks_live_input() {
+                welcome::show(&init_app);
             }
             if init_app.borrow().verification {
                 record(&format!(
@@ -981,6 +1085,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
+    pages::cancel(app);
     if state == IslandState::Idle {
         battery_effect::cancel(app);
     }
@@ -1013,7 +1118,7 @@ fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
             }
             IslandState::Expanded => a.coordinator.open(Panel::Launcher, now),
             IslandState::Media => a.coordinator.open(Panel::Media, now),
-            IslandState::Volume => a.coordinator.open(Panel::Volume, now),
+            IslandState::ControlCenter => a.coordinator.open(Panel::ControlCenter, now),
             IslandState::Compact => a.coordinator.volume(now),
             IslandState::Notification => a.coordinator.expand_notification(now),
             IslandState::Timer => a.coordinator.open(Panel::Timer, now),
@@ -1025,7 +1130,7 @@ fn transition(app: &Rc<RefCell<App>>, state: IslandState) {
     sync_presentation(app);
 }
 
-fn user_toggle(app: &Rc<RefCell<App>>) {
+fn user_toggle(app: &Rc<RefCell<App>>, keyboard: bool) {
     app.borrow_mut().visibility.reveal_hover();
     if app.borrow().coordinator.panel_open() {
         battery_effect::cancel(app);
@@ -1034,23 +1139,38 @@ fn user_toggle(app: &Rc<RefCell<App>>) {
         launcher::dismiss(app, true);
         return;
     }
+    if app.borrow().settings_visible || app.borrow().visibility.locked {
+        return;
+    }
+    let mut opened = false;
     {
         let mut a = app.borrow_mut();
         let now = a.now();
         if a.coordinator.panel_open() {
             a.coordinator.close(now);
             a.hover_intent.leave();
-        } else if matches!(a.coordinator.view(now).content, Content::Notification(..)) {
-            a.coordinator.expand_notification(now);
         } else {
-            a.coordinator.open_hover(now);
+            a.coordinator.open_default(now);
+            opened = true;
         }
     }
     sync_presentation(app);
+    if keyboard && opened && !app.borrow().verification {
+        match platform::set_keyboard_mode(true, true) {
+            Ok(()) => {
+                app.borrow_mut().panel_keyboard = true;
+                if let Some(ui) = app.borrow().ui.upgrade() {
+                    ui.invoke_focus_panel();
+                }
+            }
+            Err(error) => record(&error),
+        }
+    }
 }
 
 fn apply_content_properties(ui: &IslandWindow, view: &Presentation, settings: &Settings) {
     ui.set_app_launcher_mode(matches!(view.content, Content::AppLauncher));
+    ui.set_control_center_mode(matches!(view.content, Content::ControlCenter));
     plugins::apply_content_properties(ui, view);
     ui.set_downloads_preview(matches!(view.content, Content::DownloadsPreview(..)));
     if let Content::DownloadsPreview(title, count) = &view.content {
@@ -1146,7 +1266,7 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
                 view = previous.clone();
             }
         }
-        let enabled = a.visibility.hover_enabled(&a.settings) && !a.verification;
+        let enabled = a.visibility.hover_enabled(&a.settings) && !a.verification && !a.welcome_hint;
         let width = a.geometry(IslandState::Idle).width + 16.;
         if let Err(error) = platform::configure_hover_hide(enabled, width) {
             a.visibility.reset_hover();
@@ -1235,6 +1355,15 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
             .as_ref()
             .is_none_or(|old| old.content != view.content);
         let state = view.state();
+        if a.welcome_hint
+            && (state != IslandState::Idle || hide || a.settings_visible || a.visibility.locked)
+        {
+            a.welcome_hint = false;
+            if let Some(ui) = a.ui.upgrade() {
+                ui.set_welcome_hint(false);
+            }
+            a.retarget_shape();
+        }
         if let Some(ui) = a.ui.upgrade() {
             plugins::sync_visibility(&ui, &view);
         }
@@ -1273,6 +1402,20 @@ fn sync_presentation(app: &Rc<RefCell<App>>) {
     if revealing {
         material::resume_material(app);
     }
+    let launcher_open = app.borrow().launcher.open;
+    if !panel || launcher_open {
+        let restore = {
+            let mut a = app.borrow_mut();
+            std::mem::take(&mut a.panel_keyboard)
+        };
+        if restore {
+            let _ = platform::set_keyboard_mode(false, true);
+        }
+        if app.borrow().pending_page.is_some() {
+            pages::cancel(app);
+        }
+    }
+    control_center::sync(app, panel && state == IslandState::ControlCenter);
     if app.borrow().attached
         && let Err(e) = platform::set_panel_open(panel)
     {

@@ -1,0 +1,53 @@
+export enum GlassMaterial { shared, control-dark, control-light }
+
+export struct GlassBounds {
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+    exposure: float,
+    layer: int,
+    pressed: bool,
+    material: GlassMaterial,
+}
+
+export global LiquidSurfaces {
+    in property <bool> enabled;
+    in property <bool> ready;
+    in property <int> rendered-count;
+    in property <int> generation;
+    callback allocate() -> int;
+    callback publish(int, GlassBounds);
+    callback invalidate();
+}
+
+export component LiquidSurface inherits Rectangle {
+    in property <float> glass-exposure: 0;
+    in property <int> glass-layer: 0;
+    in property <bool> glass-pressed;
+    in property <GlassMaterial> glass-material: GlassMaterial.shared;
+    out property <bool> refracted: LiquidSurfaces.ready && self.glass-exposure > 0;
+
+    private property <int> token;
+    private property <int> generation: LiquidSurfaces.generation;
+    private property <GlassBounds> bounds: LiquidSurfaces.enabled && self.visible && self.glass-exposure > 0.005
+        ? { x: self.absolute-position.x / 1px, y: self.absolute-position.y / 1px,
+            width: self.width / 1px, height: self.height / 1px, radius: self.border-radius / 1px,
+            exposure: clamp(self.glass-exposure * self.opacity, 0, 1), layer: self.glass-layer,
+            pressed: self.glass-pressed, material: self.glass-material }
+        : { x: 0, y: 0, width: 0, height: 0, radius: 0, exposure: 0, layer: 0, pressed: false, material: GlassMaterial.shared };
+
+    function publish-bounds() {
+        if self.token == 0 && self.bounds.width > 0 && self.bounds.height > 0 {
+            self.token = LiquidSurfaces.allocate();
+        }
+        if self.token != 0 {
+            LiquidSurfaces.publish(self.token, self.bounds);
+        }
+    }
+
+    init => { self.publish-bounds(); }
+    changed bounds => { self.publish-bounds(); }
+    changed generation => { self.publish-bounds(); }
+}

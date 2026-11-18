@@ -1,0 +1,705 @@
+import { Glyph } from "controls.slint";
+import { GlassMaterial, LiquidSurface, LiquidSurfaces } from "liquid-surface.slint";
+
+export enum ControlAction {
+    Wifi, Bluetooth, Hotspot, Notifications, Mute, Power, Back,
+    Lock, Sleep, Restart, ShutDown, Confirm, WifiDevices, BluetoothDevices, RefreshDevices,
+}
+
+export struct RadioControl {
+    known: bool,
+    on: bool,
+    switchable: bool,
+    busy: bool,
+}
+
+export struct DeviceEntry {
+    id: string,
+    label: string,
+    detail: string,
+    connected: bool,
+    enabled: bool,
+    signal: int,
+}
+
+component ControlGlass inherits LiquidSurface {
+    in property <bool> light;
+    in property <color> boundary: root.light ? #263c5266 : #bed5e771;
+    in property <color> focus-boundary: root.light ? #21578c : #a8daff;
+    glass-material: root.light ? GlassMaterial.control-light : GlassMaterial.control-dark;
+}
+
+component ActionButton inherits ControlGlass {
+    in property <length> unit: 1px;
+    in property <length> font-unit: 1px;
+    in property <color> ink: white;
+    in property <color> hover-fill: #ffffff20;
+    in property <color> checked-fill: #ffffff28;
+    in property <color> idle-fill: root.outlined ? (root.light ? #233e4c22 : #162130b0) : transparent;
+    in property <string> label;
+    in property <string> name: root.label;
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <float> disabled-opacity: 0.76;
+    in property <bool> focus-ring: true;
+    in property <bool> outlined: true;
+    in property <bool> checked;
+    in property <bool> leading;
+    out property <bool> down: pointer.pressed;
+    out property <bool> focused: focus.has-focus;
+    out property <bool> hovered: root.enabled && pointer.has-hover;
+    callback activated();
+    callback interaction(bool);
+    border-radius: min(self.width, self.height) / 2;
+    border-width: root.focus-ring && focus.has-focus ? 2 * root.unit : root.outlined ? root.unit : 0px;
+    border-color: root.focus-ring && focus.has-focus ? root.focus-boundary : root.boundary;
+    glass-layer: 1;
+    glass-pressed: root.enabled && self.down;
+    background: root.enabled && pointer.pressed ? (root.light ? #0d233644 : #e0f0ff48)
+        : root.hovered ? root.hover-fill : root.checked ? root.checked-fill
+        : self.refracted ? transparent : root.idle-fill;
+    opacity: root.enabled ? 1 : root.disabled-opacity;
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    if root.icon != "" : Glyph {
+        x: root.leading ? 3 * root.unit : 0px;
+        width: root.leading ? 25 * root.unit : parent.width;
+        height: parent.height;
+        font-size: 15 * root.unit;
+        color: root.ink; text: root.icon;
+    }
+    if root.label != "" : Text {
+        x: root.leading ? (root.icon == "" ? 9 : 33) * root.unit : 0px;
+        width: parent.width - self.x;
+        height: parent.height;
+        text: root.label;
+        color: root.ink;
+        font-size: 13 * root.font-unit;
+        horizontal-alignment: root.leading ? left : center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                if !event.repeat { root.activated(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    pointer := TouchArea {
+        enabled: root.enabled; mouse-cursor: MouseCursor.pointer;
+        changed pressed => { root.interaction(self.pressed); }
+        clicked => { focus.focus(); root.activated(); }
+    }
+}
+
+component ToggleButton inherits ActionButton {
+    accessible-role: AccessibleRole.checkbox;
+    accessible-checked: root.checked;
+}
+
+component PageArrow inherits ActionButton {
+    in property <int> direction;
+    in property <string> destination;
+    y: 2 * root.unit;
+    width: 31 * root.unit; height: self.width;
+    idle-fill: root.light ? #152a4218 : #142936a6;
+    icon: root.direction < 0 ? "\u{e76b}" : "\u{e76c}";
+    name: "Open " + root.destination;
+}
+
+component Fader inherits Rectangle {
+    in property <length> unit;
+    in property <length> font-unit;
+    in property <bool> light;
+    in property <float> glass-exposure;
+    in property <string> label;
+    in property <string> symbol;
+    in property <string> action-name;
+    in property <int> value;
+    in property <bool> available;
+    in property <bool> interactive;
+    in property <bool> dimmed;
+    in property <string> fallback;
+    callback changed(int);
+    callback action();
+    callback interaction(bool);
+    private property <color> ink: root.light ? #172934 : #f3f7fa;
+    private property <length> inset: 33 * root.unit;
+    private property <int> shown: pointer.pressed ? root.pointer-value() : root.value;
+    private property <length> fill-width: root.available && root.shown > 0
+        ? root.inset + max(0px, rail.width - root.inset) * root.shown / 100 : 0px;
+    private property <color> symbol-ink: root.light || root.fill-width > root.inset ? #14212b : #f4f7fd;
+    function pointer-value() -> int {
+        return round(clamp(pointer.mouse-x / max(root.unit, pointer.width), 0, 1) * 100);
+    }
+    public function hit(x: length, y: length) -> bool {
+        return x >= 0px && x < self.width && y >= 0px && y < self.height;
+    }
+    rail := ControlGlass {
+        x: 0px; y: 0px; width: max(0px, parent.width - 56 * root.unit); height: parent.height;
+        light: root.light; glass-exposure: root.glass-exposure;
+        border-radius: self.height / 2;
+        border-width: focus.has-focus ? 2 * root.unit : root.unit;
+        border-color: focus.has-focus ? self.focus-boundary : self.boundary;
+        background: self.refracted ? (root.light ? #233e4c23 : #0d15247a) : (root.light ? #233e4c29 : #10151e);
+        clip: true;
+        LiquidSurface {
+            x: 0px; y: 0px; height: parent.height;
+            width: root.fill-width;
+            glass-exposure: root.glass-exposure; glass-layer: 1; glass-pressed: pointer.pressed;
+            border-radius: min(self.width, self.height) / 2;
+            background: self.refracted
+                ? (root.dimmed ? #8498aa9e : root.light ? #7796b0db : #e6f0fadb)
+                : (root.dimmed ? #8498aa : root.light ? #7796b0 : #e6f0fa);
+        }
+        if root.action-name == "" : Glyph {
+            x: 3 * root.unit; y: 0px; width: 28 * root.unit; height: parent.height;
+            text: root.symbol; font-size: 15 * root.unit;
+            color: root.symbol-ink;
+        }
+        if root.fallback != "" : Text {
+            x: 39 * root.unit; y: 0px; height: parent.height; width: max(0px, parent.width - self.x);
+            text: root.fallback; color: root.ink; font-size: 11 * root.font-unit;
+            vertical-alignment: center; overflow: elide;
+        }
+    }
+    Text {
+        x: parent.width - 51 * root.unit; y: 0px; width: 48 * root.unit; height: parent.height;
+        horizontal-alignment: center; vertical-alignment: center;
+        text: root.available ? root.shown + "%" : "—";
+        color: root.ink; font-size: 12 * root.font-unit; font-weight: 600;
+    }
+    if root.action-name != "" : ActionButton {
+        x: 3 * root.unit; y: 3 * root.unit; width: 28 * root.unit; height: parent.height - 6 * root.unit;
+        unit: root.unit; light: root.light; ink: root.symbol-ink;
+        glass-exposure: root.glass-exposure; glass-layer: 2;
+        hover-fill: root.symbol-ink == #14212b ? #14212b18 : #ffffff27;
+        border-radius: self.height / 2;
+        icon: root.symbol; name: root.action-name; enabled: root.interactive && root.available;
+        activated => { root.action(); }
+        interaction(down) => { root.interaction(down); }
+    }
+    focus := FocusScope {
+        x: pointer.x; y: pointer.y; width: pointer.width; height: pointer.height;
+        enabled: root.available && root.interactive;
+        focus-on-click: false;
+        accessible-role: slider;
+        accessible-enabled: self.enabled;
+        accessible-label: root.label;
+        accessible-orientation: horizontal;
+        accessible-value: root.value;
+        accessible-value-minimum: 0;
+        accessible-value-maximum: 100;
+        accessible-value-step: 2;
+        accessible-action-set-value(value) => {
+            if self.enabled && value.is-float() { root.changed(round(clamp(value.to-float(), 0, 100))); }
+        }
+        accessible-action-increment => { if self.enabled { root.changed(min(100, root.value + 2)); } }
+        accessible-action-decrement => { if self.enabled { root.changed(max(0, root.value - 2)); } }
+        key-pressed(event) => {
+            if event.text == Key.UpArrow || event.text == Key.RightArrow {
+                root.changed(min(100, root.value + 2)); return accept;
+            }
+            if event.text == Key.DownArrow || event.text == Key.LeftArrow {
+                root.changed(max(0, root.value - 2)); return accept;
+            }
+            if event.text == Key.Home { root.changed(0); return accept; }
+            if event.text == Key.End { root.changed(100); return accept; }
+            return reject;
+        }
+    }
+    pointer := TouchArea {
+        enabled: focus.enabled; mouse-cursor: MouseCursor.pointer;
+        x: rail.x + root.inset; y: rail.y; width: max(0px, rail.width - root.inset); height: rail.height;
+        changed pressed => {
+            root.interaction(self.pressed);
+            if self.pressed { focus.focus(); root.changed(root.pointer-value()); }
+        }
+        moved => { if self.pressed { root.changed(root.pointer-value()); } }
+    }
+}
+
+component ControlTile inherits ControlGlass {
+    in property <length> unit;
+    in property <length> font-unit;
+    in property <string> label;
+    in property <string> detail;
+    in property <string> icon;
+    in property <string> name: root.label;
+    in property <bool> interactive;
+    in property <bool> split;
+    in property <bool> toggle-enabled;
+    in property <bool> highlighted;
+    in property <bool> checked: root.highlighted;
+    in property <color> icon-color: root.highlighted ? white : root.ink;
+    callback activated();
+    callback toggled();
+    callback interaction(bool);
+    private property <color> ink: root.light ? #182936 : #f5faff;
+    private property <color> soft: root.light ? #435964 : #c7d8e6;
+    private property <bool> compact: self.width < 154 * root.unit;
+    private property <length> label-inset: (root.compact ? 25 : 44) * root.unit;
+    private property <length> switch-target: (root.compact ? 28 : 45) * root.unit;
+    border-radius: min(self.width, self.height) / 2;
+    glass-pressed: tile-button.down || device-button.down || radio-switch.down;
+    private property <bool> body-focused: root.split ? device-button.focused : tile-button.focused;
+    border-width: root.body-focused ? 2 * root.unit : root.unit;
+    border-color: root.body-focused ? root.focus-boundary
+        : root.highlighted ? (root.light ? #2462a98c : #72aafab0) : root.boundary;
+    background: root.highlighted ? (root.light ? #659ae448 : #2672c85c)
+        : self.refracted ? transparent : (root.light ? #304e6619 : #1429368f);
+    tile-button := ToggleButton {
+        visible: !root.split;
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        unit: root.unit; light: root.light; ink: root.ink; name: root.name; enabled: self.visible && root.interactive;
+        outlined: false; focus-ring: false;
+        hover-fill: root.light ? #0000000b : #ffffff12; checked-fill: transparent;
+        checked: root.checked;
+        border-radius: parent.border-radius;
+        activated => { root.activated(); }
+        interaction(down) => { root.interaction(down); }
+    }
+    device-button := ActionButton {
+        visible: root.split;
+        x: 0px; y: 0px; width: max(0px, parent.width - root.switch-target); height: parent.height;
+        outlined: false; focus-ring: false;
+        unit: root.unit; light: root.light; ink: root.ink; name: root.name; enabled: self.visible && root.interactive;
+        hover-fill: root.light ? #0000000b : #ffffff12;
+        activated => { root.activated(); }
+        interaction(down) => { root.interaction(down); }
+    }
+    Rectangle {
+        x: (root.compact ? 4 : 8) * root.unit; y: (parent.height - self.height) / 2;
+        width: (root.compact ? 18 : 29) * root.unit; height: self.width; border-radius: self.width / 2;
+        background: root.highlighted ? #347be0 : root.light ? #22455526 : #14242fc4;
+        Glyph {
+            text: root.icon; color: root.icon-color; font-size: (root.compact ? 11 : 14) * root.unit;
+        }
+    }
+    Text {
+        x: root.label-inset; y: 4 * root.unit; width: max(0px, parent.width - self.x - 28 * root.unit);
+        height: parent.height / 2 - 2 * root.unit;
+        color: root.ink; text: root.label; font-size: 12 * root.font-unit; font-weight: 650;
+        vertical-alignment: bottom; overflow: elide;
+    }
+    Text {
+        x: root.label-inset; y: parent.height / 2 + 2 * root.unit;
+        width: max(0px, parent.width - self.x - 28 * root.unit); height: parent.height / 2 - 5 * root.unit;
+        color: root.soft; text: root.detail; font-size: 10 * root.font-unit;
+        vertical-alignment: top; overflow: elide;
+    }
+    LiquidSurface {
+        x: parent.width - 28 * root.unit; y: (parent.height - self.height) / 2;
+        width: 20 * root.unit; height: 11 * root.unit; border-radius: self.height / 2;
+        glass-exposure: root.glass-exposure; glass-layer: 1;
+        background: root.checked ? (self.refracted ? #347be0aa : #347be0)
+            : root.light ? #20384940 : #bbd4e83b;
+        opacity: (root.split ? root.toggle-enabled : root.interactive) ? 1 : 0.48;
+        Rectangle {
+            x: root.checked ? parent.width - self.width - 2 * root.unit : 2 * root.unit;
+            y: (parent.height - self.height) / 2;
+            width: 7 * root.unit; height: self.width; border-radius: self.width / 2;
+            background: root.checked || !root.light ? #f0f7fd : #3c5263;
+        }
+    }
+    radio-switch := ToggleButton {
+        visible: root.split;
+        x: parent.width - self.width; y: 1 * root.unit;
+        width: root.switch-target; height: parent.height - 2 * root.unit;
+        unit: root.unit; light: root.light; ink: root.ink; name: "Toggle " + root.label;
+        outlined: false;
+        checked: root.checked; checked-fill: transparent;
+        hover-fill: root.light ? #0000000e : #ffffff16;
+        enabled: self.visible && root.toggle-enabled;
+        activated => { root.toggled(); }
+        interaction(down) => { root.interaction(down); }
+    }
+}
+
+struct Shortcut {
+    name: string,
+    icon: string,
+    caption: string,
+    action: ControlAction,
+}
+
+component ShortcutStrip inherits LiquidSurface {
+    in property <length> unit;
+    in property <length> font-unit;
+    in property <bool> light;
+    in property <bool> interactive;
+    in property <[Shortcut]> items;
+    callback action(ControlAction);
+    callback interaction(bool);
+    private property <length> gap: 4 * root.unit;
+    private property <length> cell: max(0px, (self.width - 6 * root.unit
+        - max(0, root.items.length - 1) * self.gap) / max(1, root.items.length));
+    border-radius: min(self.width, self.height) / 2;
+    border-width: self.refracted ? 0px : root.unit;
+    border-color: root.light ? #2d536c31 : #a6d9f334;
+    background: self.refracted ? transparent : (root.light ? #304e6619 : #1429368f);
+    for item[index] in root.items : ActionButton {
+        x: 3 * root.unit + (root.cell + root.gap) * index;
+        y: 3 * root.unit; height: parent.height - 6 * root.unit;
+        width: root.cell;
+        unit: root.unit; font-unit: root.font-unit; light: root.light;
+        glass-exposure: root.glass-exposure;
+        icon: self.label == "" ? item.icon : "";
+        name: item.name;
+        label: item.icon == "" || self.hovered || self.focused ? item.caption : "";
+        ink: item.icon != "" ? (root.light ? #182936 : #f5faff) : (root.light ? #783729 : #ffb7a8);
+        idle-fill: item.icon != "" ? (root.light ? #152a4219 : #101f30a0) : (root.light ? #aa584e23 : #b4564942);
+        hover-fill: root.light ? #192d4636 : #ffffff29;
+        enabled: root.interactive;
+        activated => { root.action(item.action); }
+        interaction(down) => { root.interaction(down); }
+    }
+}
+
+export component ControlCenter inherits Rectangle {
+    in property <length> unit;
+    in property <length> font-unit;
+    in property <bool> light;
+    in property <float> glass-exposure;
+    in property <bool> wide;
+    in property <bool> interactive;
+    in property <int> volume;
+    in property <bool> volume-available;
+    in property <bool> muted;
+    in property <int> brightness: -1;
+    in property <bool> brightness-checked;
+    in property <RadioControl> wifi;
+    in property <RadioControl> bluetooth;
+    in property <RadioControl> hotspot;
+    in property <string> hotspot-detail;
+    in property <bool> previews-available;
+    in property <bool> previews-on;
+    in property <string> previews-detail;
+    in property <[DeviceEntry]> devices;
+    in property <string> device-detail;
+    in property <bool> devices-busy;
+    in property <float> device-progress;
+    in property <string> error;
+    in property <int> menu;
+    in property <bool> power-busy;
+    in property <int> page-count;
+    in property <string> previous-page-label;
+    in property <string> next-page-label;
+    callback step(int);
+    callback device-action(string);
+    changed devices => { LiquidSurfaces.invalidate(); }
+    callback action(ControlAction);
+    callback set-volume(int);
+    callback set-brightness(int);
+    callback interaction(bool);
+    private property <color> ink: root.light ? #202024 : #ffffff;
+    private property <color> soft: root.light ? #4b4b54 : #d7d7e0;
+    private property <color> tint: root.light ? #00000022 : #ffffff25;
+    private property <color> checked: root.light ? #18478224 : #baceff44;
+    private property <length> gap: 8 * root.unit;
+    private property <length> tile-width: max(0px, (self.width - (root.wide ? 2 : 1) * root.gap) / (root.wide ? 3 : 2));
+    private property <length> slider-y: (root.wide ? 150 : 256) * root.unit;
+    private property <length> slider-height: 34 * root.unit;
+    private property <bool> device-menu: root.menu == 4 || root.menu == 5;
+    private property <bool> device-interactive: root.device-menu && root.interactive && root.device-progress > 0.55;
+    private property <float> overview-exposure: root.glass-exposure * (1 - root.device-progress);
+    private property <bool> overview-interactive: root.interactive && root.device-progress < 0.55;
+    private property <string> page-title: previous-arrow.hovered ? previous-arrow.name
+        : next-arrow.hovered ? next-arrow.name
+        : previous-arrow.enabled && previous-arrow.focused ? previous-arrow.name
+        : next-arrow.enabled && next-arrow.focused ? next-arrow.name : "Control Center";
+
+    pure function radio-detail(radio: RadioControl) -> string {
+        return radio.busy ? "Changing…" : !radio.known ? "Unavailable"
+            : radio.switchable ? (radio.on ? "On" : "Off") : "Blocked";
+    }
+
+    pure function wifi-glyph(signal: int) -> string {
+        return signal >= 67 ? "\u{e874}" : signal >= 34 ? "\u{e873}"
+            : signal > 0 ? "\u{e872}" : "\u{e871}";
+    }
+
+    public function fader-hit(x: length, y: length) -> int {
+        if !root.interactive || root.menu != 0 { return 0; }
+        if volume-fader.hit(x - volume-fader.x, y - volume-fader.y) { return 1; }
+        if brightness-fader.hit(x - brightness-fader.x, y - brightness-fader.y) { return 2; }
+        return 0;
+    }
+
+    TouchArea {
+        // Disabled controls leave clicks here instead of toggling the island.
+        enabled: root.interactive;
+        changed pressed => { root.interaction(self.pressed); }
+    }
+
+    ActionButton {
+        visible: root.menu != 0;
+        x: 0px; y: 0px; width: 34 * root.unit; height: 36 * root.unit;
+        unit: root.unit; font-unit: root.font-unit; light: root.light; ink: root.ink; hover-fill: root.tint;
+        glass-exposure: self.visible ? root.glass-exposure : 0;
+        enabled: self.visible && root.interactive; icon: "\u{e72b}"; name: "Back";
+        activated => { root.action(ControlAction.Back); }
+        interaction(down) => { root.interaction(down); }
+    }
+    ActionButton {
+        visible: root.device-menu;
+        x: parent.width - self.width; y: 1 * root.unit; width: 34 * root.unit; height: self.width;
+        unit: root.unit; light: root.light; ink: root.ink; hover-fill: root.tint;
+        glass-exposure: self.visible ? root.glass-exposure : 0;
+        enabled: root.device-interactive && !root.devices-busy;
+        icon: "\u{e72c}"; name: root.menu == 4 ? "Refresh networks" : "Refresh devices";
+        activated => { root.action(ControlAction.RefreshDevices); }
+        interaction(down) => { root.interaction(down); }
+    }
+    Text {
+        x: 42 * root.unit; y: 0px;
+        width: parent.width - 84 * root.unit; height: 35 * root.unit;
+        text: root.menu == 0 ? root.page-title : root.menu == 4 ? "Wi-Fi" : root.menu == 5 ? "Bluetooth" : "Power";
+        color: root.ink; font-size: 18 * root.font-unit; font-weight: 650;
+        horizontal-alignment: root.menu == 0 ? center : left;
+        vertical-alignment: center; overflow: elide;
+    }
+    Rectangle {
+        width: parent.width; height: parent.height;
+        opacity: 1 - root.device-progress;
+        visible: root.menu == 0;
+        previous-arrow := PageArrow {
+            visible: root.page-count > 1;
+            x: 0px;
+            direction: -1; destination: root.previous-page-label;
+            unit: root.unit; ink: root.ink; hover-fill: root.tint; light: root.light;
+            glass-exposure: root.menu == 0 && self.visible ? root.overview-exposure : 0;
+            enabled: self.visible && root.menu == 0 && root.overview-interactive;
+            activated => { root.step(self.direction); }
+            interaction(down) => { root.interaction(down); }
+        }
+        next-arrow := PageArrow {
+            visible: root.page-count > 1;
+            x: parent.width - self.width;
+            direction: 1; destination: root.next-page-label;
+            unit: root.unit; ink: root.ink; hover-fill: root.tint; light: root.light;
+            glass-exposure: root.menu == 0 && self.visible ? root.overview-exposure : 0;
+            enabled: self.visible && root.menu == 0 && root.overview-interactive;
+            activated => { root.step(self.direction); }
+            interaction(down) => { root.interaction(down); }
+        }
+
+        wifi-tile := ControlTile {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: 0px; y: 42 * root.unit; width: root.tile-width; height: 46 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            interactive: self.visible && root.overview-interactive;
+            split: true; name: "Wi-Fi networks";
+            toggle-enabled: self.visible && root.overview-interactive && root.wifi.switchable && !root.wifi.busy;
+            icon: "\u{e701}"; label: "Wi-Fi";
+            detail: root.radio-detail(root.wifi);
+            highlighted: root.wifi.on;
+            activated => { root.action(ControlAction.WifiDevices); }
+            toggled => { root.action(ControlAction.Wifi); }
+            interaction(down) => { root.interaction(down); }
+        }
+        bluetooth-tile := ControlTile {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: 0px; y: 94 * root.unit; width: root.tile-width; height: 46 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            interactive: self.visible && root.overview-interactive;
+            split: true; name: "Bluetooth devices";
+            toggle-enabled: self.visible && root.overview-interactive && root.bluetooth.switchable && !root.bluetooth.busy;
+            icon: "\u{e702}"; label: "Bluetooth";
+            detail: root.radio-detail(root.bluetooth);
+            highlighted: root.bluetooth.on;
+            activated => { root.action(ControlAction.BluetoothDevices); }
+            toggled => { root.action(ControlAction.Bluetooth); }
+            interaction(down) => { root.interaction(down); }
+        }
+        mode-tile := ControlTile {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: root.tile-width + root.gap; y: 42 * root.unit; width: root.tile-width; height: 46 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            interactive: self.visible && root.overview-interactive && root.previews-available;
+            icon: "\u{ea8f}"; label: "Previews"; name: "Still Island notification previews";
+            icon-color: root.light ? #855819 : #f5c766;
+            detail: root.previews-detail; checked: root.previews-on;
+            activated => { root.action(ControlAction.Notifications); }
+            interaction(down) => { root.interaction(down); }
+        }
+        hotspot-tile := ControlTile {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: root.tile-width + root.gap; y: 94 * root.unit; width: root.tile-width; height: 46 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            interactive: self.visible && root.overview-interactive && root.hotspot.switchable && !root.hotspot.busy;
+            icon: "\u{e88a}"; label: "Hotspot"; name: "Mobile hotspot";
+            detail: root.hotspot-detail; highlighted: root.hotspot.on;
+            activated => { root.action(ControlAction.Hotspot); }
+            interaction(down) => { root.interaction(down); }
+        }
+        power-strip := ShortcutStrip {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: root.wide ? 2 * (root.tile-width + root.gap) : 0px;
+            y: (root.wide ? 42 : 148) * root.unit;
+            width: root.wide ? root.tile-width : parent.width; height: 46 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            interactive: self.visible && root.overview-interactive && !root.power-busy;
+            items: [
+                {name: "Lock Windows", icon: "\u{e72e}", caption: "Lock", action: ControlAction.Lock},
+                {name: "Put Windows to sleep", icon: "\u{e708}", caption: "Sleep", action: ControlAction.Sleep}
+            ];
+            action(action) => { root.action(action); }
+            interaction(down) => { root.interaction(down); }
+        }
+        power-options := ShortcutStrip {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: root.wide ? 2 * (root.tile-width + root.gap) : 0px;
+            y: (root.wide ? 94 : 200) * root.unit;
+            width: root.wide ? root.tile-width : parent.width; height: 46 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            interactive: self.visible && root.overview-interactive && !root.power-busy;
+            items: [{name: "Power options", icon: "", caption: "Power", action: ControlAction.Power}];
+            action(action) => { root.action(action); }
+            interaction(down) => { root.interaction(down); }
+        }
+        brightness-fader := Fader {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: 0px; y: root.slider-y; width: parent.width; height: root.slider-height;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            label: "Brightness"; symbol: "\u{e706}"; value: max(0, root.brightness); available: root.brightness >= 0;
+            interactive: self.visible && root.overview-interactive;
+            fallback: root.brightness-checked && root.brightness < 0 ? "Brightness unavailable" : "";
+            changed(value) => { root.set-brightness(value); }
+            interaction(down) => { root.interaction(down); }
+        }
+        volume-fader := Fader {
+            visible: root.menu == 0; glass-exposure: self.visible ? root.overview-exposure : 0;
+            x: 0px; y: root.slider-y + 40 * root.unit; width: parent.width; height: root.slider-height;
+            unit: root.unit; font-unit: root.font-unit; light: root.light;
+            label: "Volume"; symbol: root.muted ? "\u{e74f}" : "\u{e767}";
+            value: root.volume; available: root.volume-available;
+            interactive: self.visible && root.overview-interactive; dimmed: root.muted;
+            fallback: root.volume-available ? "" : "No output";
+            action-name: root.muted ? "Unmute output" : "Mute output";
+            changed(value) => { root.set-volume(value); }
+            action => { root.action(ControlAction.Mute); }
+            interaction(down) => { root.interaction(down); }
+        }
+    }
+    power-menu := Rectangle {
+        visible: root.menu == 1;
+        x: 0px; y: 44 * root.unit; width: parent.width; height: 180 * root.unit;
+        for item[index] in [
+            {label: "Lock", icon: "\u{e72e}", action: ControlAction.Lock},
+            {label: "Sleep", icon: "\u{e708}", action: ControlAction.Sleep},
+            {label: "Restart", icon: "\u{e72c}", action: ControlAction.Restart},
+            {label: "Shut down", icon: "\u{e7e8}", action: ControlAction.ShutDown}
+        ] : ActionButton {
+            x: 0px; y: index * 46 * root.unit; width: parent.width; height: 42 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light; ink: root.ink; hover-fill: root.tint;
+            label: item.label; icon: item.icon; leading: true;
+            glass-exposure: power-menu.visible ? root.glass-exposure : 0;
+            enabled: power-menu.visible && root.interactive && !root.power-busy;
+            activated => { root.action(item.action); }
+            interaction(down) => { root.interaction(down); }
+        }
+    }
+    confirmation := Rectangle {
+        visible: root.menu == 2 || root.menu == 3;
+        x: 0px; y: 77 * root.unit; width: parent.width; height: 114 * root.unit;
+        Text {
+            x: 0px; y: 0px; width: parent.width; height: 38 * root.unit; vertical-alignment: center;
+            color: root.ink; font-size: 17 * root.font-unit;
+            text: root.menu == 2 ? "Restart Windows?" : "Shut down Windows?";
+        }
+        ActionButton {
+            x: 0px; y: 56 * root.unit; width: 115 * root.unit; height: 40 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light; ink: root.ink; hover-fill: root.tint;
+            label: "Cancel"; enabled: confirmation.visible && root.interactive && !root.power-busy;
+            glass-exposure: confirmation.visible ? root.glass-exposure : 0;
+            activated => { root.action(ControlAction.Back); }
+            interaction(down) => { root.interaction(down); }
+        }
+        ActionButton {
+            x: 123 * root.unit; y: 56 * root.unit; width: 115 * root.unit; height: 40 * root.unit;
+            unit: root.unit; font-unit: root.font-unit; light: root.light; ink: root.ink; hover-fill: root.tint; checked-fill: root.checked;
+            checked: true; label: root.menu == 2 ? "Restart" : "Shut down";
+            enabled: confirmation.visible && root.interactive && !root.power-busy;
+            glass-exposure: confirmation.visible ? root.glass-exposure : 0;
+            activated => { root.action(ControlAction.Confirm); }
+            interaction(down) => { root.interaction(down); }
+        }
+    }
+    device-panel := Rectangle {
+        visible: root.device-menu;
+        opacity: root.device-progress;
+        x: 0px; y: (44 + 7 * (1 - root.device-progress)) * root.unit;
+        width: parent.width; height: max(0px, parent.height - self.y - 9 * root.unit);
+        private property <length> status-height: root.device-detail == "" ? 0px : max(24 * root.unit, 17 * root.font-unit);
+        changed visible => { devices-list.content-y = 0px; }
+        Text {
+            x: 5 * root.unit; y: 0px; width: max(0px, parent.width - 10 * root.unit);
+            height: parent.status-height; text: root.device-detail;
+            color: root.soft; font-size: 12 * root.font-unit; overflow: elide;
+            vertical-alignment: center;
+        }
+        devices-list := Flickable {
+            x: 0px; y: parent.status-height; width: parent.width; height: max(0px, parent.height - self.y);
+            content-width: self.width;
+            content-height: max(self.height, root.devices.length * self.step - 6 * root.unit);
+            private property <length> step: max(52 * root.unit, 35 * root.font-unit + 6 * root.unit);
+            interactive: root.device-interactive;
+            for entry[index] in root.devices : ActionButton {
+                x: 0px; y: index * devices-list.step;
+                width: devices-list.width; height: devices-list.step - 6 * root.unit;
+                unit: root.unit; font-unit: root.font-unit; light: root.light; ink: root.ink;
+                name: entry.label + (entry.detail == "" ? "" : ", " + entry.detail)
+                    + (entry.signal < 0 ? "" : ", signal " + entry.signal + "%");
+                enabled: root.device-interactive && entry.enabled && !root.devices-busy;
+                disabled-opacity: entry.connected ? 1 : 0.82;
+                checked: entry.connected; checked-fill: root.checked;
+                idle-fill: root.light ? #233e4c16 : #1429368f;
+                hover-fill: root.tint;
+                // The Slint viewport clips labels. Publish glass only inside the same viewport.
+                glass-exposure: device-panel.visible && self.y + devices-list.content-y >= -0.5px
+                    && self.y + self.height + devices-list.content-y <= devices-list.height + 0.5px
+                    ? root.glass-exposure * root.device-progress : 0;
+                activated => { root.device-action(entry.id); }
+                interaction(down) => { root.interaction(down); }
+                changed focused => {
+                    if self.focused {
+                        devices-list.content-y = clamp(devices-list.content-y,
+                            min(0px, devices-list.height - self.y - self.height), -self.y);
+                    }
+                }
+                Text {
+                    x: (entry.signal >= 0 ? 46 : 17) * root.unit; y: entry.detail == "" ? 0px : 4 * root.unit;
+                    width: max(0px, parent.width - self.x - 32 * root.unit);
+                    height: entry.detail == "" ? parent.height : parent.height / 2 - 1 * root.unit;
+                    text: entry.label; color: root.ink; font-size: 13 * root.font-unit; font-weight: 600;
+                    vertical-alignment: entry.detail == "" ? center : bottom; overflow: elide;
+                }
+                if entry.detail != "" : Text {
+                    x: (entry.signal >= 0 ? 46 : 17) * root.unit; y: parent.height / 2 + 4 * root.unit;
+                    width: max(0px, parent.width - self.x - 32 * root.unit); height: parent.height / 2 - 6 * root.unit;
+                    text: entry.detail; color: root.soft; font-size: 10 * root.font-unit; overflow: elide;
+                }
+                Glyph {
+                    visible: entry.signal >= 0; x: 13 * root.unit; width: 24 * root.unit; height: parent.height;
+                    text: root.wifi-glyph(entry.signal); color: root.ink; font-size: 16 * root.unit;
+                }
+                Glyph {
+                    visible: entry.connected; x: parent.width - 36 * root.unit; width: 24 * root.unit;
+                    height: parent.height; text: "\u{e73e}"; color: root.ink; font-size: 13 * root.unit;
+                }
+            }
+        }
+    }
+    if root.error != "" && !root.device-menu : Text {
+        x: 0px; y: root.menu == 0 ? root.slider-y + 76 * root.unit : 225 * root.unit;
+        width: parent.width; height: 16 * root.unit;
+        text: root.error; color: root.soft; font-size: 10 * root.font-unit; overflow: elide;
+    }
+}

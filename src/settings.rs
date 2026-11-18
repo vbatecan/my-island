@@ -74,6 +74,7 @@ pub struct Settings {
     pub hover_only_maximized: bool,
     pub hover_delay: u32,
     pub collapse_delay: u32,
+    pub collapse_on_leave: bool,
     pub scroll_volume: bool,
     pub middle_mute: bool,
     pub volume_step: u32,
@@ -107,7 +108,7 @@ impl Default for Settings {
 
             topmost: true,
             offset: 6.,
-            appearance: Appearance::Solid,
+            appearance: Appearance::LiquidGlass,
             form_factor: FormFactor::Notch,
             notch_corner_radius: 8.,
             notch_contracted_radius: 8.,
@@ -134,12 +135,13 @@ impl Default for Settings {
             hover_only_maximized: false,
             hover_delay: 350,
             collapse_delay: 350,
+            collapse_on_leave: false,
             scroll_volume: true,
             middle_mute: true,
             volume_step: 2,
-            outside_click: true,
+            outside_click: false,
             shortcut_enabled: true,
-            fullscreen_hide: true,
+            fullscreen_hide: false,
             monitor_id: String::new(),
         }
     }
@@ -255,12 +257,18 @@ impl Settings {
             .join("settings.ini")
     }
     pub fn load() -> Self {
-        fs::read_to_string(Self::path())
-            .map(|s| Self::parse(&s))
-            .unwrap_or_default()
+        match fs::read_to_string(Self::path()) {
+            Ok(text) => Self::parse(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(_) => Self::parse(""),
+        }
     }
     pub fn parse(text: &str) -> Self {
-        let mut s = Self::default();
+        // Configurations predating an explicit material used Solid.
+        let mut s = Self {
+            appearance: Appearance::Solid,
+            ..Self::default()
+        };
         for line in text.lines() {
             if let Some((k, v)) = line.split_once('=') {
                 match k {
@@ -400,7 +408,8 @@ impl Settings {
                             s.volume_step = v;
                         }
                     }
-                    "outside_click" => s.outside_click = v != "false",
+                    "collapse_on_leave" => s.collapse_on_leave = v == "true",
+                    "outside_click" => s.outside_click = v == "true",
                     "shortcut_enabled" => s.shortcut_enabled = v != "false",
                     "launcher_windows" => s.launcher_windows = v != "false",
                     "launcher_calculator" => s.launcher_calculator = v != "false",
@@ -411,7 +420,7 @@ impl Settings {
                             s.launcher_shortcut = value;
                         }
                     }
-                    "fullscreen_hide" => s.fullscreen_hide = v != "false",
+                    "fullscreen_hide" => s.fullscreen_hide = v == "true",
                     "monitor_id" => s.monitor_id = v.to_owned(),
                     _ => {}
                 }
@@ -471,8 +480,8 @@ impl Settings {
         }
         text.push_str(&format!("animation_speed={}\n", self.animation_speed));
         text.push_str(&format!(
-            "collapse_delay={}\nscroll_volume={}\nmiddle_mute={}\nvolume_step={}\n",
-            self.collapse_delay, self.scroll_volume, self.middle_mute, self.volume_step
+            "collapse_delay={}\ncollapse_on_leave={}\nscroll_volume={}\nmiddle_mute={}\nvolume_step={}\n",
+            self.collapse_delay, self.collapse_on_leave, self.scroll_volume, self.middle_mute, self.volume_step
         ));
         text.push_str(&format!(
             "form_factor={}\nbattery_previews={}\nnotch_corner_radius={}\nnotch_contracted_radius={}\nonline_lyrics={}\n",
@@ -623,6 +632,21 @@ impl Appearance {
 }
 #[cfg(test)]
 mod liquid_settings_tests {
+    #[test]
+    fn fresh_settings_use_liquid_glass_and_legacy_materials_are_preserved() {
+        use super::{Appearance, Settings};
+        assert_eq!(Settings::default().appearance, Appearance::LiquidGlass);
+        assert_eq!(Settings::parse("opacity=0.4").appearance, Appearance::Solid);
+        assert_eq!(
+            Settings::parse("appearance=acrylic").appearance,
+            Appearance::Acrylic
+        );
+        assert_eq!(
+            Settings::parse(&Settings::default().encode()).appearance,
+            Appearance::LiquidGlass
+        );
+    }
+
     #[test]
     fn liquid_optics_keep_legacy_defaults_and_round_trip_with_bounds() {
         use super::{LiquidGlassSettings, Settings};
@@ -858,6 +882,7 @@ mod tests {
     #[test]
     fn parsed_and_live_settings_share_validation() {
         let mut live = Settings {
+            appearance: Appearance::Solid,
             offset: -1.,
             opacity: 9.,
             notification_duration: 99,

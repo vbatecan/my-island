@@ -1,19 +1,27 @@
 // Shared island controls. Animation and application state remain in the host.
-export component TextButton inherits Rectangle {
+import { LiquidSurface } from "liquid-surface.slint";
+
+export component TextButton inherits LiquidSurface {
     in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     in property <float> text-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
     in property <string> label;
+    in property <string> action-label: root.label;
     in property <bool> enabled: true;
+    in property <bool> primary: false;
     callback clicked();
     callback interaction(bool);
     border-radius: (5 * root.scaled-pixel);
-    background: !root.enabled ? (root.light-material ? #0000000a : #ffffff0a) : button.pressed ? (root.light-material ? #00000036 : #ffffff36) : button.has-hover ? (root.light-material ? #00000028 : #ffffff28) : (root.light-material ? #00000012 : #ffffff12);
+    glass-pressed: root.enabled && button.pressed;
+    background: root.primary ? (root.light-material ? (button.has-hover ? #44464c : #26282d) : (button.has-hover ? white : #e4e6eb))
+        : root.refracted ? (button.has-hover ? (root.light-material ? #00000012 : #ffffff12) : transparent)
+        : !root.enabled ? (root.light-material ? #0000000a : #ffffff0a) : button.pressed ? (root.light-material ? #00000036 : #ffffff36) : button.has-hover ? (root.light-material ? #00000028 : #ffffff28) : (root.light-material ? #00000012 : #ffffff12);
     accessible-role: AccessibleRole.button;
-    accessible-label: root.label;
+    accessible-label: root.action-label;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
     opacity: root.enabled ? 1 : 0.35;
-    Text { text: root.label; color: (root.light-material ? #202024 : white); font-size: (11 * root.scaled-pixel * root.text-scale); horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+    Text { text: root.label; color: root.primary == root.light-material ? white : #202024; font-size: (11 * root.scaled-pixel * root.text-scale); font-weight: root.primary ? 600 : 400; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
     button := TouchArea { enabled: root.enabled; mouse-cursor: pointer; changed pressed => { root.interaction(self.pressed); } clicked => { root.clicked(); } }
 }
 
@@ -28,7 +36,37 @@ export component Glyph inherits Text {
     vertical-alignment: center;
 }
 
-export component QuietButton inherits Rectangle {
+export component HomeLink inherits LiquidSurface {
+    in property <bool> light-material;
+    in property <length> unit;
+    in property <string> label;
+    callback clicked();
+    callback interaction(bool);
+
+    glass-pressed: pointer.pressed;
+    background: pointer.has-hover ? (root.light-material ? #00000020 : #ffffff20)
+        : root.refracted ? transparent : (root.light-material ? #00000011 : #ffffff11);
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    @children
+    Glyph {
+        x: parent.width - 20 * root.unit;
+        y: 0px;
+        width: 12 * root.unit;
+        height: parent.height;
+        font-size: 10 * root.unit;
+        color: root.light-material ? #4b4b54 : #c5c5cd;
+        text: "\u{e76c}";
+    }
+    pointer := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        changed pressed => { root.interaction(self.pressed); }
+        clicked => { root.clicked(); }
+    }
+}
+
+export component QuietButton inherits LiquidSurface {
     in property <bool> light-material: false;
     in property <bool> filled: false;
     in property <float> ui-scale: 1;
@@ -42,7 +80,9 @@ export component QuietButton inherits Rectangle {
     width: (32 * root.scaled-pixel);
     height: (28 * root.scaled-pixel);
     border-radius: self.height / 2;
-    background: root.filled ? #151517 : !root.enabled ? transparent : pointer.pressed ? (root.light-material ? #00000030 : #ffffff30) : pointer.has-hover ? (root.light-material ? #00000020 : #ffffff20) : root.active ? (root.light-material ? #00000024 : #ffffff24) : transparent;
+    glass-pressed: root.enabled && pointer.pressed;
+    background: root.refracted ? (root.active || pointer.has-hover ? (root.light-material ? #00000012 : #ffffff12) : transparent)
+        : root.filled ? #151517 : !root.enabled ? transparent : pointer.pressed ? (root.light-material ? #00000030 : #ffffff30) : pointer.has-hover ? (root.light-material ? #00000020 : #ffffff20) : root.active ? (root.light-material ? #00000024 : #ffffff24) : transparent;
     opacity: root.enabled ? 1 : 0.3;
     accessible-role: AccessibleRole.button;
     accessible-label: root.label;
@@ -68,13 +108,13 @@ export component PlaybackButton inherits QuietButton {
     changed playing => { self.glyph-mix = self.playing ? 1 : 0; }
     changed motion-enabled => { if !self.motion-enabled { self.step-animated = false; self.glyph-mix = self.playing ? 1 : 0; } else { self.step-animated = true; } }
     animate glyph-mix { duration: root.motion-enabled && root.step-animated ? 150ms / min(2, max(0.5, root.motion-speed)) : 0ms; easing: ease-out; }
-    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; color: white; text: "\u{e768}"; opacity: 1 - root.glyph-mix; }
-    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; color: white; text: "\u{e769}"; opacity: root.glyph-mix; }
+    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; color: root.refracted && root.light-material ? #202024 : white; text: "\u{e768}"; opacity: 1 - root.glyph-mix; }
+    Glyph { light-material: root.light-material; ui-scale: root.ui-scale; color: root.refracted && root.light-material ? #202024 : white; text: "\u{e769}"; opacity: root.glyph-mix; }
 }
 
 // Keep the normalized fill, corner treatment, and optional seek thumb identical
 // across media, volume, and countdown displays. The host owns all input handling.
-export component ProgressTrack inherits Rectangle {
+export component ProgressTrack inherits LiquidSurface {
     in property <bool> light-material: false;
     in property <float> ui-scale: 1;
     private property <length> scaled-pixel: 1px * root.ui-scale;
@@ -87,7 +127,7 @@ export component ProgressTrack inherits Rectangle {
     private property <float> normalized: min(1, max(0, root.value));
     height: (3 * root.scaled-pixel);
     border-radius: self.height / 2;
-    background: root.track-color;
+    background: root.refracted ? transparent : root.track-color;
     Rectangle { x: 0px; y: 0px; width: parent.width * root.normalized; height: parent.height; border-radius: parent.border-radius; background: root.fill-color; }
     if root.show-thumb : Rectangle {
         x: min(max(0px, parent.width - self.width), max(0px, parent.width * root.normalized - self.width / 2));

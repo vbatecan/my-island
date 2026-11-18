@@ -94,10 +94,11 @@ export component SettingsWindow inherits Window {
     in-out property <bool> hover-only-maximized: false;
     in-out property <int> hover-delay: 350;
     in-out property <int> collapse-delay: 350;
+    in-out property <bool> collapse-on-leave: false;
     in-out property <bool> scroll-volume: true;
     in-out property <bool> middle-mute: true;
     in-out property <int> volume-step: 2;
-    in-out property <bool> outside-click: true;
+    in-out property <bool> outside-click: false;
     in-out property <bool> shortcut-enabled: true;
     in-out property <bool> launcher-windows: true;
     in-out property <bool> launcher-calculator: true;
@@ -105,7 +106,7 @@ export component SettingsWindow inherits Window {
     in-out property <bool> launcher-enabled: true;
     in-out property <int> launcher-shortcut: 0;
     callback clear-launcher-history();
-    in-out property <bool> fullscreen-hide: true;
+    in-out property <bool> fullscreen-hide: false;
     in property <[string]> monitor-names: ["Primary display"];
     in-out property <int> monitor-index: 0;
     in property <string> status-text;
@@ -124,108 +125,128 @@ export component SettingsWindow inherits Window {
         key-pressed(event) => { if event.text == Key.Escape { root.close-settings(); return accept; } return reject; }
         VerticalLayout {
             padding: 24px; spacing: 12px;
-            Text { text: "Make it yours"; font-size: 25px; font-weight: 600; color: white; vertical-stretch: 0; }
-            Note { text: "A quiet island, tuned to your desktop. Changes save automatically."; }
-            if root.active-tab == 0 : Rectangle {
-                height: 140px; vertical-stretch: 0;
-                HorizontalLayout { x: 0px; y: 0px; width: parent.width; height: 28px; spacing: 12px;
-                    Label { text: "Live preview"; horizontal-stretch: 1; }
-                    ComboBox { accessible-label: "Preview state"; model: ["Contracted", "Expanded", "Media"]; current-index <=> root.preview-state; selected => { root.preview-changed(); } }
-                }
-                preview-card := Rectangle {
-                    x: 0px; y: 36px; width: parent.width; height: 104px;
-                    background: #34343e; border-radius: 8px; clip: true;
-                    private property <float> fit: min(0.55 * root.island-scale-percent / 100, (self.width / 1px - 24) / max(root.media-width + 16, root.expanded-width + 16), 88 / max(root.media-height, root.expanded-height));
-                    if root.appearance-index == 5: Image {
-                        x: preview-shape.x; y: preview-shape.y;
-                        width: preview-shape.width; height: preview-shape.height;
-                        source: root.liquid-preview; image-fit: fill;
-                    }
-                    preview-shape := Path {
-                        x: (parent.width - self.width) / 2; y: 0px;
-                        width: root.preview-display-width * preview-card.fit * 1px;
-                        height: root.preview-display-height * preview-card.fit * 1px;
-                        viewbox-x: 0; viewbox-y: 0; viewbox-width: root.preview-width; viewbox-height: root.preview-height;
-                        commands: root.preview-path; fill: root.appearance-index == 5 ? transparent : root.appearance-index == 0 ? black : #000000.with-alpha(root.tint); stroke-width: 0px;
-                    }
-                    Text { x: preview-shape.x + 8px; y: max(0px, preview-shape.height / 2 - 12px); width: max(0px, preview-shape.width - 16px); height: 24px;
-                        text: root.preview-state == 0 ? "Still" : "Still Island"; color: root.appearance-index == 5 && root.tint < 0.35 ? #202024 : white; font-size: (root.preview-state == 0 ? 13px : 18px) * preview-card.fit * root.text-scale-percent / 100;
-                        overflow: elide; horizontal-alignment: center; vertical-alignment: center;
-                    }
-                    Text { x: 12px; y: parent.height - 20px; width: parent.width - 24px; height: 16px; font-size: 10px; color: #d0d0da;
-                        text: "Fitted preview · shape, text and tint update immediately"; horizontal-alignment: center;
-                    }
-                }
-            }
+            Text { text: root.title; font-size: 25px; font-weight: 600; color: white; vertical-stretch: 0; }
+            Note { text: "Changes save automatically."; }
             tabs := TabWidget {
                 min-height: 180px;
                 current-index <=> root.active-tab;
                 Tab { title: "Appearance";
-                    ScrollView {
-                    x: 0px; y: 0px; width: parent.width; height: parent.height;
-                    PageLayout {
-                        Heading { text: "Shape"; }
-                        ComboBox { accessible-label: "Overlay shape"; model: ["Notch · attached to display", "Island · floating capsule"]; current-index <=> root.form-factor-index; selected => { root.changed(); } }
-                        Note { text: root.form-factor-index == 0 ? "Curved shoulders join the display edge. Expanded corners stay softly rounded." : "A floating capsule with adjustable distance from the display edge."; }
-                        FieldRow { FieldLabel { text: "Island size (%)"; } SpinBox { accessible-label: "Island size percentage"; minimum: 75; maximum: 150; step-size: 5; value <=> root.island-scale-percent; edited => { root.changed(); } }
+                    VerticalLayout {
+                        x: 0px; y: 0px; width: parent.width; height: parent.height;
+                        VerticalLayout {
+                            padding: 16px; padding-top: 12px; padding-bottom: 0px; spacing: 8px;
+                            vertical-stretch: 0;
+                            HorizontalLayout {
+                                height: 32px; spacing: 12px;
+                                Label { text: "Live preview"; horizontal-stretch: 1; }
+                                ComboBox {
+                                    width: 164px; accessible-label: "Preview state";
+                                    model: ["Contracted", "Expanded", "Media"];
+                                    current-index <=> root.preview-state;
+                                    selected => { root.preview-changed(); }
+                                }
+                            }
+                            preview-card := Rectangle {
+                                height: 112px; border-radius: 8px; clip: true;
+                                // Keep these stops in sync with the glass sample in preferences.rs.
+                                background: @linear-gradient(90deg, #445463, #8b9ba7);
+                                private property <float> fit: min(
+                                    0.9 * root.island-scale-percent / 100,
+                                    (self.width / 1px - 24) / max(1, root.preview-display-width),
+                                    (self.height / 1px - 12) / max(1, root.preview-display-height),
+                                );
+                                if root.appearance-index == 5 : Image {
+                                    x: preview-shape.x; y: preview-shape.y;
+                                    width: preview-shape.width; height: preview-shape.height;
+                                    source: root.liquid-preview; image-fit: fill;
+                                }
+                                preview-shape := Path {
+                                    x: (parent.width - self.width) / 2;
+                                    y: root.form-factor-index == 0 ? 0px : 6px;
+                                    width: root.preview-display-width * preview-card.fit * 1px;
+                                    height: root.preview-display-height * preview-card.fit * 1px;
+                                    viewbox-x: 0; viewbox-y: 0;
+                                    viewbox-width: root.preview-width; viewbox-height: root.preview-height;
+                                    commands: root.preview-path;
+                                    fill: root.appearance-index == 5 ? transparent : root.appearance-index == 0 ? black : #000000.with-alpha(root.tint);
+                                    stroke-width: 0px;
+                                }
+                                Text {
+                                    x: preview-shape.x + 8px; y: preview-shape.y;
+                                    width: max(0px, preview-shape.width - 16px); height: preview-shape.height;
+                                    text: root.preview-state == 0 ? "Still" : "Still Island";
+                                    color: root.appearance-index == 5 && root.tint < 0.35 ? #0b1219 : white;
+                                    font-size: min((root.preview-state == 0 ? 12px : 16px) * root.text-scale-percent / 100, preview-shape.height * 0.8);
+                                    overflow: elide; horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
                         }
-                        Note { text: "Scales the notch or island, text, and controls together."; }
-                        FieldRow { FieldLabel { text: "Text size (%)"; } SpinBox { accessible-label: "Text size percentage"; minimum: 80; maximum: 140; step-size: 5; value <=> root.text-scale-percent; edited => { root.changed(); } } }
-                        Note { text: "Text size changes typography only. Layout dimensions and overall zoom are independent."; }
-                        HorizontalLayout { spacing: 12px;
-                            ComboBox { accessible-label: "Layout preset"; model: ["Balanced", "Roomy", "Larger text"]; current-index <=> root.layout-preset; horizontal-stretch: 1; }
-                            Button { text: "Apply preset"; clicked => { root.apply-layout-preset(root.layout-preset); } }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            PageLayout {
+                                FieldRow {
+                                    FieldLabel { text: "Shape"; }
+                                    ComboBox { accessible-label: "Overlay shape"; model: ["Notch · attached to display", "Island · floating capsule"]; current-index <=> root.form-factor-index; selected => { root.changed(); } }
+                                }
+                                FieldRow { FieldLabel { text: "Overall size (%)"; } SpinBox { accessible-label: "Overall size percentage"; minimum: 75; maximum: 150; step-size: 5; value <=> root.island-scale-percent; edited => { root.changed(); } }
+                                }
+                                Note { text: "Scales the entire panel, including text and controls."; }
+                                FieldRow { FieldLabel { text: "Text size (%)"; } SpinBox { accessible-label: "Text size percentage"; minimum: 80; maximum: 140; step-size: 5; value <=> root.text-scale-percent; edited => { root.changed(); } } }
+                                Note { text: "Presets set panel dimensions, text size, and overall zoom."; }
+                                HorizontalLayout { spacing: 12px;
+                                    ComboBox { accessible-label: "Layout preset"; model: ["Balanced", "Roomy", "Larger text"]; current-index <=> root.layout-preset; horizontal-stretch: 1; }
+                                    Button { text: "Apply preset"; clicked => { root.apply-layout-preset(root.layout-preset); } }
+                                }
+                                CheckBox { text: "Advanced shape dimensions and corners"; checked <=> root.advanced-appearance; }
+                                if root.advanced-appearance : VerticalLayout {
+                                    spacing: 12px;
+                                    Heading { text: "Contracted size"; }
+                                    FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Contracted width"; minimum: 100; maximum: 320; value <=> root.contracted-width; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Contracted height"; minimum: 28; maximum: 64; value <=> root.contracted-height; edited => { root.changed(); } } }
+                                    Heading { text: "Expanded size"; }
+                                    FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Expanded width"; minimum: 320; maximum: 900; value <=> root.expanded-width; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Expanded height"; minimum: 160; maximum: 360; value <=> root.expanded-height; edited => { root.changed(); } } }
+                                    Heading { text: "Media size"; }
+                                    FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Media width"; minimum: 480; maximum: 1000; value <=> root.media-width; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Media height"; minimum: 216; maximum: 400; value <=> root.media-height; edited => { root.changed(); } } }
+                                    Note { text: "Width and height reshape the island. Use Overall size (%) to scale the whole panel."; }
+                                    FieldRow { FieldLabel { text: "Expanded notch corners (pixels)"; } SpinBox { accessible-label: "Expanded notch corner radius in logical pixels"; enabled: root.form-factor-index == 0; minimum: 0; maximum: 24; value <=> root.notch-corner-radius; edited => { root.changed(); } }
+                                    }
+                                    FieldRow { FieldLabel { text: "Contracted notch corners (pixels)"; } SpinBox { accessible-label: "Contracted notch corner radius in logical pixels"; enabled: root.form-factor-index == 0; minimum: 0; maximum: 24; value <=> root.notch-contracted-radius; edited => { root.changed(); } }
+                                    }
+                                    Note { text: "Contracted corners apply to the idle and compact notch, capped at half its height. Both notch radii default to 8 pixels."; }
+                                }
+                                Heading { text: "Material"; }
+                                ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live", "Liquid Glass"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
+                                Note { text: root.appearance-index == 5 ? "Live refractive glass with adaptive controls." : root.appearance-index == 4 ? "Glass follows the desktop at up to 60 updates per second." : root.appearance-index == 3 ? "Eco glass follows the desktop at up to 30 updates per second." : root.appearance-index == 2 ? "Acrylic blurs the desktop as it changes." : "Use transparency and tint to balance lightness with readable controls."; }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Label { text: "Transparency / black tint"; }
+                                    Text { text: round(root.tint * 100) + "%"; color: #bcbcc7; horizontal-stretch: 1; horizontal-alignment: right; vertical-alignment: center; }
+                                }
+                                Slider { accessible-label: "Tint strength"; minimum: 0.15; maximum: 0.95; value <=> root.tint; changed => { root.changed(); } }
+                                if root.appearance-index == 5 : VerticalLayout {
+                                    spacing: 6px;
+                                    FieldRow { FieldLabel { text: "Refraction (%)"; } SpinBox { accessible-label: "Liquid Glass refraction percentage"; minimum: 0; maximum: 100; value <=> root.liquid-refraction; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Bevel depth (pixels)"; } SpinBox { accessible-label: "Liquid Glass bevel depth in logical pixels"; minimum: 1; maximum: 24; value <=> root.liquid-depth; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Color dispersion (%)"; } SpinBox { accessible-label: "Liquid Glass color dispersion percentage"; minimum: 0; maximum: 100; value <=> root.liquid-dispersion; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Frost (pixels)"; } SpinBox { accessible-label: "Liquid Glass frost radius in logical pixels"; minimum: 0; maximum: 24; value <=> root.liquid-frost; edited => { root.changed(); } } }
+                                    FieldRow { FieldLabel { text: "Rim light (%)"; } SpinBox { accessible-label: "Liquid Glass rim light percentage"; minimum: 0; maximum: 100; value <=> root.liquid-rim-light; edited => { root.changed(); } } }
+                                }
+                                Rule {}
+                                Heading { text: "Motion"; }
+                                CheckBox { text: "Enable animations"; checked <=> root.animations-enabled; toggled => { root.changed(); } }
+                                CheckBox { text: "Respect Windows reduced motion"; checked <=> root.follow-reduced-motion; toggled => { root.changed(); } }
+                                FieldRow { FieldLabel { text: "Animation speed (%)"; } SpinBox { accessible-label: "Animation speed percentage"; enabled: root.animations-enabled; minimum: 50; maximum: 200; step-size: 10; value <=> root.animation-speed-percent; edited => { root.changed(); } }
+                                }
+                                Note { text: "100% is normal. Lower values slow motion; higher values speed it up. Hover delays and countdown timing stay independent."; }
+                                Label { text: "Spring character"; }
+                                ComboBox { accessible-label: "Spring character"; enabled: root.animations-enabled; model: ["Calm", "Balanced", "Bouncy"]; current-index <=> root.bounce-index; selected => { root.changed(); } }
+                                Button { text: "Preview motion"; enabled: root.animations-enabled; clicked => { root.preview-motion(); } }
+                                Note { text: "Retargeting preserves momentum, including when you reverse a transition."; }
+                            }
                         }
-                        Note { text: "Presets change dimensions, text size and zoom. Your material, startup and other preferences stay unchanged."; }
-                        CheckBox { text: "Advanced shape dimensions and corners"; checked <=> root.advanced-appearance; }
-                        if root.advanced-appearance : VerticalLayout {
-                            spacing: 12px;
-                        Heading { text: "Contracted size"; }
-                        FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Contracted width"; minimum: 100; maximum: 320; value <=> root.contracted-width; edited => { root.changed(); } } }
-                        FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Contracted height"; minimum: 28; maximum: 64; value <=> root.contracted-height; edited => { root.changed(); } } }
-                        Heading { text: "Expanded size"; }
-                        FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Expanded width"; minimum: 320; maximum: 900; value <=> root.expanded-width; edited => { root.changed(); } } }
-                        FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Expanded height"; minimum: 160; maximum: 360; value <=> root.expanded-height; edited => { root.changed(); } } }
-                        Heading { text: "Media size"; }
-                        FieldRow { FieldLabel { text: "Width (pixels)"; } SpinBox { accessible-label: "Media width"; minimum: 480; maximum: 1000; value <=> root.media-width; edited => { root.changed(); } } }
-                        FieldRow { FieldLabel { text: "Height (pixels)"; } SpinBox { accessible-label: "Media height"; minimum: 216; maximum: 400; value <=> root.media-height; edited => { root.changed(); } } }
-                        Note { text: "Width and height reshape the island without changing text size. Island size (%) separately controls overall zoom."; }
-                        FieldRow { FieldLabel { text: "Expanded notch corners (pixels)"; } SpinBox { accessible-label: "Expanded notch corner radius in logical pixels"; enabled: root.form-factor-index == 0; minimum: 0; maximum: 24; value <=> root.notch-corner-radius; edited => { root.changed(); } }
-                        }
-                        FieldRow { FieldLabel { text: "Contracted notch corners (pixels)"; } SpinBox { accessible-label: "Contracted notch corner radius in logical pixels"; enabled: root.form-factor-index == 0; minimum: 0; maximum: 24; value <=> root.notch-contracted-radius; edited => { root.changed(); } }
-                        }
-                        Note { text: "Contracted corners apply to the idle and compact notch, capped at half its height. Both notch radii default to 8 pixels."; }
-                        }
-                        Heading { text: "Material"; }
-                        ComboBox { accessible-label: "Island material"; model: ["Solid black", "Transparent", "Acrylic", "Glass · Eco", "Glass · Live", "Liquid Glass"]; current-index <=> root.appearance-index; selected => { root.changed(); } }
-                        Note { text: root.appearance-index == 5 ? "Live refractive glass with adaptive controls." : root.appearance-index == 4 ? "Glass follows the desktop at up to 60 updates per second." : root.appearance-index == 3 ? "Eco glass follows the desktop at up to 30 updates per second." : root.appearance-index == 2 ? "Acrylic blurs the desktop as it changes." : "Use transparency and tint to balance lightness with readable controls."; }
-                        HorizontalLayout {
-                            spacing: 12px;
-                            Label { text: "Transparency / black tint"; }
-                            Text { text: round(root.tint * 100) + "%"; color: #bcbcc7; horizontal-stretch: 1; horizontal-alignment: right; vertical-alignment: center; }
-                        }
-                        Slider { accessible-label: "Tint strength"; minimum: 0.15; maximum: 0.95; value <=> root.tint; changed => { root.changed(); } }
-                        if root.appearance-index == 5 : VerticalLayout {
-                            spacing: 6px;
-                            FieldRow { FieldLabel { text: "Refraction (%)"; } SpinBox { accessible-label: "Liquid Glass refraction percentage"; minimum: 0; maximum: 100; value <=> root.liquid-refraction; edited => { root.changed(); } } }
-                            FieldRow { FieldLabel { text: "Bevel depth (pixels)"; } SpinBox { accessible-label: "Liquid Glass bevel depth in logical pixels"; minimum: 1; maximum: 24; value <=> root.liquid-depth; edited => { root.changed(); } } }
-                            FieldRow { FieldLabel { text: "Color dispersion (%)"; } SpinBox { accessible-label: "Liquid Glass color dispersion percentage"; minimum: 0; maximum: 100; value <=> root.liquid-dispersion; edited => { root.changed(); } } }
-                            FieldRow { FieldLabel { text: "Frost (pixels)"; } SpinBox { accessible-label: "Liquid Glass frost radius in logical pixels"; minimum: 0; maximum: 24; value <=> root.liquid-frost; edited => { root.changed(); } } }
-                            FieldRow { FieldLabel { text: "Rim light (%)"; } SpinBox { accessible-label: "Liquid Glass rim light percentage"; minimum: 0; maximum: 100; value <=> root.liquid-rim-light; edited => { root.changed(); } } }
-                        }
-                        Rule {}
-                        Heading { text: "Motion"; }
-                        CheckBox { text: "Enable animations"; checked <=> root.animations-enabled; toggled => { root.changed(); } }
-                        CheckBox { text: "Respect Windows reduced motion"; checked <=> root.follow-reduced-motion; toggled => { root.changed(); } }
-                        FieldRow { FieldLabel { text: "Animation speed (%)"; } SpinBox { accessible-label: "Animation speed percentage"; enabled: root.animations-enabled; minimum: 50; maximum: 200; step-size: 10; value <=> root.animation-speed-percent; edited => { root.changed(); } }
-                        }
-                        Note { text: "100% is normal. Lower values slow motion; higher values speed it up. Hover delays and countdown timing stay independent."; }
-                        Label { text: "Spring character"; }
-                        ComboBox { accessible-label: "Spring character"; enabled: root.animations-enabled; model: ["Calm", "Balanced", "Bouncy"]; current-index <=> root.bounce-index; selected => { root.changed(); } }
-                        Button { text: "Preview motion"; enabled: root.animations-enabled; clicked => { root.preview-motion(); } }
-                        Note { text: "Retargeting preserves momentum, including when you reverse a transition."; }
                     }
-                }
                 }
                 Tab { title: "Interaction"; ScrollView { PageLayout {
                         Heading { text: "Interaction"; }
@@ -235,11 +256,14 @@ export component SettingsWindow inherits Window {
                         CheckBox { text: "Expand on hover"; checked <=> root.hover-expand; toggled => { root.changed(); } }
                         FieldRow { FieldLabel { text: "Hover delay (milliseconds)"; } SpinBox { accessible-label: "Hover delay in milliseconds"; minimum: 200; maximum: 2000; step-size: 50; value <=> root.hover-delay; enabled: root.hover-expand; edited => { root.changed(); } }
                         }
-                        Note { text: "Pause the pointer to expand. Moving across the island resets the hover delay. Pin a panel to keep it open."; }
-                        FieldRow { FieldLabel { text: "Collapse delay (milliseconds)"; } SpinBox { accessible-label: "Collapse delay in milliseconds"; minimum: 0; maximum: 2000; step-size: 50; value <=> root.collapse-delay; edited => { root.changed(); } }
+                        Note { text: "Pause the pointer to expand. Moving across the island resets the hover delay."; }
+                        CheckBox { text: "Collapse when the pointer leaves"; checked <=> root.collapse-on-leave; toggled => { root.changed(); } }
+                        if root.collapse-on-leave : FieldRow {
+                            FieldLabel { text: "Collapse delay (milliseconds)"; }
+                            SpinBox { accessible-label: "Collapse delay in milliseconds"; minimum: 0; maximum: 2000; step-size: 50; value <=> root.collapse-delay; edited => { root.changed(); } }
                         }
                         CheckBox { text: "Scroll compact notch or volume controls to adjust volume"; checked <=> root.scroll-volume; toggled => { root.changed(); } }
-                        Note { text: "Scroll elsewhere in the expanded notch to switch pages. Lyrics and long integration views scroll normally. The selected page stays compact when you leave."; }
+                        Note { text: "Scroll elsewhere in the expanded notch to switch pages. Device lists, lyrics, and long integration views scroll normally."; }
                         FieldRow { FieldLabel { text: "Volume change per wheel notch (%)"; } SpinBox { accessible-label: "Volume step percent"; minimum: 1; maximum: 10; value <=> root.volume-step; enabled: root.scroll-volume; edited => { root.changed(); } }
                         }
                         CheckBox { text: "Middle-click island to mute / unmute"; checked <=> root.middle-mute; toggled => { root.changed(); } }

@@ -81,9 +81,11 @@ pub fn install_preview_renderer(ui: &SettingsWindow) {
                     tint: ui.get_tint(),
                     optics: read_liquid_glass(&ui),
                     sample_y: 0.,
+                    controls: Arc::from([]),
+                    motion_speed: 0.,
                 };
-                match worker.update(sample, 1, layout) {
-                    Ok(Some(image)) => ui.set_liquid_preview(image),
+                match worker.update(sample, 1, &layout) {
+                    Ok(Some(frame)) => ui.set_liquid_preview(frame.shell),
                     Ok(None) => {}
                     Err(error) => {
                         eprintln!("Liquid Glass preview unavailable: {error}");
@@ -112,23 +114,25 @@ fn read_liquid_glass(ui: &SettingsWindow) -> LiquidGlassSettings {
 }
 
 fn preview_backdrop() -> crate::material::Backdrop {
-    let mut sample = crate::material::Backdrop {
-        width: 512,
-        height: 256,
-        pixels: Vec::with_capacity(512 * 256 * 4),
-    };
-    for y in 0..256 {
-        for x in 0..512 {
-            sample
-                .pixels
-                .extend_from_slice(if (x / 60 + y / 40) % 2 == 0 {
-                    &[215, 222, 235, 255]
-                } else {
-                    &[75, 117, 150, 255]
-                });
+    // The same slate gradient sits behind the preview in settings.slint.
+    const DARK: [u8; 3] = [0x44, 0x54, 0x63];
+    const LIGHT: [u8; 3] = [0x8b, 0x9b, 0xa7];
+    let width = 512;
+    let height = 256;
+    let mut row = Vec::with_capacity(width as usize * 4);
+    let span = width - 1;
+    for x in 0..width {
+        for (dark, light) in DARK.into_iter().zip(LIGHT) {
+            let value = (u32::from(dark) * (span - x) + u32::from(light) * x) / span;
+            row.push(value as u8);
         }
+        row.push(255);
     }
-    sample
+    crate::material::Backdrop {
+        width,
+        height,
+        pixels: row.repeat(height as usize),
+    }
 }
 pub fn populate(
     ui: &SettingsWindow,
@@ -199,6 +203,7 @@ pub fn populate(
     ui.set_hover_only_maximized(s.hover_only_maximized);
     ui.set_hover_delay(s.hover_delay as i32);
     ui.set_collapse_delay(s.collapse_delay as i32);
+    ui.set_collapse_on_leave(s.collapse_on_leave);
     ui.set_scroll_volume(s.scroll_volume);
     ui.set_middle_mute(s.middle_mute);
     ui.set_volume_step(s.volume_step as i32);
@@ -273,6 +278,7 @@ pub fn read(ui: &SettingsWindow, old: &Settings, monitors: &[MonitorInfo]) -> Se
     s.hover_only_maximized = ui.get_hover_only_maximized();
     s.hover_delay = ui.get_hover_delay().max(0) as u32;
     s.collapse_delay = ui.get_collapse_delay().max(0) as u32;
+    s.collapse_on_leave = ui.get_collapse_on_leave();
     s.scroll_volume = ui.get_scroll_volume();
     s.middle_mute = ui.get_middle_mute();
     s.volume_step = ui.get_volume_step().max(0) as u32;
@@ -305,7 +311,7 @@ mod tests {
         assert_eq!(s.opacity, 0.8);
         assert_eq!(s.bounce, Bounce::Lively);
         assert!(!s.notifications_enabled);
-        assert!(s.auto_volume && s.fullscreen_hide);
+        assert!(s.auto_volume && !s.fullscreen_hide);
         assert_eq!(s.hover_delay, 350);
         assert_eq!(s.notch_contracted_radius, 8.);
         assert_eq!(s.island_scale, 1.);

@@ -109,7 +109,11 @@ pub(super) fn wire(app: &Rc<RefCell<App>>, ui: &IslandWindow) {
     }
     {
         let app = app.clone();
-        ui.on_escape(move || transition(&app, IslandState::Idle));
+        ui.on_escape(move || {
+            if !control_center::back(&app) {
+                transition(&app, IslandState::Idle);
+            }
+        });
     }
 }
 
@@ -162,6 +166,7 @@ fn set_hover(app: &Rc<RefCell<App>>, hover: bool) {
 
 fn hover_hide_eligible(a: &App) -> bool {
     a.visibility.hover_enabled(&a.settings)
+        && !a.welcome_hint
         && !a.visibility.protected_visit
         && !a.visibility.hover_hidden
         && !a.coordinator.panel_open()
@@ -376,6 +381,7 @@ pub(super) fn schedule_hover(app: &Rc<RefCell<App>>) {
         let a = app.borrow();
         if !a.hover
             || !a.settings.hover_expand
+            || a.welcome_hint
             || a.hidden
             || a.visibility.hover_hidden
             || a.settings_visible
@@ -409,6 +415,7 @@ pub(super) fn schedule_hover(app: &Rc<RefCell<App>>) {
                     let now = a.now();
                     let eligible = a.hover
                         && a.settings.hover_expand
+                        && !a.welcome_hint
                         && !a.hidden
                         && !a.settings_visible
                         && !a.coordinator.panel_open();
@@ -418,7 +425,7 @@ pub(super) fn schedule_hover(app: &Rc<RefCell<App>>) {
                             a.hover, a.hidden, a.settings_visible, a.coordinator.panel_open(), a.state, a.hover_intent));
                     }
                     if eligible && ready {
-                        a.coordinator.open_hover(now);
+                        a.coordinator.open_default(now);
                     }
                     drop(a);
                     sync_presentation(&app);
@@ -438,7 +445,13 @@ pub(super) fn schedule_collapse(app: &Rc<RefCell<App>>) {
     app.borrow().collapse_timer.stop();
     let delay = {
         let a = app.borrow();
-        if a.hover || a.pointer_pressed || a.coordinator.pinned() || !a.coordinator.panel_open() {
+        if !a.settings.collapse_on_leave
+            || a.hover
+            || a.pointer_pressed
+            || a.panel_keyboard
+            || a.coordinator.pinned()
+            || !a.coordinator.panel_open()
+        {
             return;
         }
         a.settings.collapse_delay
@@ -468,7 +481,11 @@ pub(super) fn schedule_collapse(app: &Rc<RefCell<App>>) {
                         a.state
                     ));
                 }
-                if !a.hover && !a.pointer_pressed {
+                if a.settings.collapse_on_leave
+                    && !a.hover
+                    && !a.pointer_pressed
+                    && !a.panel_keyboard
+                {
                     a.coordinator.close_hover(now);
                 }
                 drop(a);
@@ -553,13 +570,25 @@ pub(super) fn handle_overlay_input(
                         let a = app.borrow();
                         a.launcher.open && a.launcher.focus_epoch == epoch
                     };
-                    if current && !platform::launcher_has_foreground() {
+                    if current && !platform::overlay_has_foreground() {
                         launcher::dismiss(&app, false);
                     }
                 }
             });
         }
         return EventResult::Propagate;
+    }
+    if matches!(event, WindowEvent::Focused(false)) && app.borrow().panel_keyboard {
+        let weak = Rc::downgrade(app);
+        slint::Timer::single_shot(Duration::from_millis(16), move || {
+            if let Some(app) = weak.upgrade()
+                && app.borrow().panel_keyboard
+                && !platform::overlay_has_foreground()
+            {
+                app.borrow_mut().panel_keyboard = false;
+                let _ = platform::set_keyboard_mode(false, false);
+            }
+        });
     }
     // Slint invokes this filter before it draws or handles the native geometry
     // event. The attach-time query can therefore run before the HWND is visible,
@@ -658,8 +687,10 @@ pub(super) fn handle_overlay_input(
     if matches!(event, WindowEvent::MouseWheel { .. }) {
         let mut a = app.borrow_mut();
         if a.pointer.is_some_and(|(x, y)| {
-            a.ui.upgrade()
-                .is_some_and(|ui| ui.invoke_lyrics_scroll_hit(x as f32, y as f32))
+            a.ui.upgrade().is_some_and(|ui| {
+                ui.invoke_lyrics_scroll_hit(x as f32, y as f32)
+                    || (ui.get_control_center_mode() && matches!(ui.get_control_menu(), 4 | 5))
+            })
         }) {
             a.wheel.reset();
             a.page_wheel.reset();
@@ -667,6 +698,25 @@ pub(super) fn handle_overlay_input(
         }
     }
     if let WindowEvent::MouseWheel { delta, .. } = event {
+        let fader = {
+            let a = app.borrow();
+            a.pointer
+                .and_then(|(x, y)| {
+                    a.ui.upgrade()
+                        .map(|ui| ui.invoke_control_fader_hit(x as f32, y as f32))
+                })
+                .unwrap_or(0)
+        };
+        if fader != 0 {
+            let notches = match delta {
+                MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                MouseScrollDelta::PixelDelta(p) => p.y / 40.,
+            };
+            if !app.borrow().pointer_pressed {
+                control_center::wheel(app, fader, notches);
+            }
+            return EventResult::PreventDefault;
+        }
         let (expanded, protected, picker, pressed) = {
             let a = app.borrow();
             let ui = a.ui.upgrade();
